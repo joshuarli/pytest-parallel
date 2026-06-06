@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -38,37 +39,41 @@ class Coordinator:
         self._work_dir = Path(tempfile.mkdtemp(prefix="pytest_parallel_"))
         self._completed = 0
         self._failed = 0
+        self._failed_nodeids: list[str] = []
         self._total = 0
 
     def run(self, session: pytest.Session) -> bool:
-        if not session.items:
-            shutil.rmtree(self._work_dir, ignore_errors=True)
+        workers: list[tuple[int, Any, Path, Path]] = []
+        try:
+            if not session.items:
+                return True
+
+            max_workers = self.config.hook.pytest_parallel_max_workers() or _DEFAULT_MAX_WORKERS
+            num_workers = max(1, min(self.requested_workers, len(session.items), max_workers))
+            groups = self._partition(session.items, num_workers)
+            self._total = len(session.items)
+
+            terminal = session.config.get_terminal_writer()
+            terminal.sep("=", f"pytest-parallel: {num_workers} workers, {self._total} tests")
+            for index, group in enumerate(groups):
+                file_count = len({item.nodeid.split("::")[0] for item in group})
+                terminal.line(f"  worker {index}: {len(group)} tests ({file_count} files)")
+
+            self.config.hook.pytest_parallel_pre_spawn(config=self.config, num_workers=num_workers)
+
+            active = [(index, [item.nodeid for item in group]) for index, group in enumerate(groups) if group]
+            # Fork/spawn at the last possible point before monitoring starts. At this point
+            # pytest has completed collection, but the coordinator has not started polling
+            # loops or helper threads.
+            _assert_safe_to_start_workers()
+            workers = self._spawn(active)
+            self._monitor(workers, {item.nodeid: item for item in session.items}, session)
+
+            session.testsfailed = self._failed
             return True
-
-        max_workers = self.config.hook.pytest_parallel_max_workers() or _DEFAULT_MAX_WORKERS
-        num_workers = max(1, min(self.requested_workers, len(session.items), max_workers))
-        groups = self._partition(session.items, num_workers)
-        test_lists = self._write_test_lists(groups)
-        self._total = len(session.items)
-
-        terminal = session.config.get_terminal_writer()
-        terminal.sep("=", f"pytest-parallel: {num_workers} workers, {self._total} tests")
-        for index, group in enumerate(groups):
-            file_count = len({item.nodeid.split("::")[0] for item in group})
-            terminal.line(f"  worker {index}: {len(group)} tests ({file_count} files)")
-
-        self.config.hook.pytest_parallel_pre_spawn(config=self.config, num_workers=num_workers)
-
-        active = [(index, test_lists[index]) for index, group in enumerate(groups) if group]
-        # Fork/spawn at the last possible point before monitoring starts. At this point
-        # pytest has completed collection and the shard files exist, but the coordinator
-        # has not started polling loops or helper threads.
-        workers = self._spawn(active)
-        self._monitor(workers, {item.nodeid: item for item in session.items}, session)
-
-        session.testsfailed = self._failed
-        shutil.rmtree(self._work_dir, ignore_errors=True)
-        return True
+        finally:
+            self._terminate_live_workers(workers)
+            shutil.rmtree(self._work_dir, ignore_errors=True)
 
     @staticmethod
     def _partition(items: Sequence[ShardItem], num_workers: int) -> list[list[ShardItem]]:
@@ -86,14 +91,6 @@ class Coordinator:
             buckets[index % num_workers].extend(by_file[file_name])
         return buckets
 
-    def _write_test_lists(self, groups: Sequence[Sequence[ShardItem]]) -> list[Path]:
-        paths = []
-        for index, items in enumerate(groups):
-            path = self._work_dir / f"worker_{index}_tests.txt"
-            path.write_text("\n".join(item.nodeid for item in items) + "\n")
-            paths.append(path)
-        return paths
-
     def _forwarded_args(self) -> list[str]:
         args = []
         skip_next = False
@@ -104,12 +101,12 @@ class Coordinator:
             if skip_next:
                 skip_next = False
                 continue
-            if arg in {"-n", "--numprocesses"}:
+            if arg in {"-j", "--jobs"}:
                 skip_next = True
                 continue
-            if arg.startswith("-n") and arg != "-n":
+            if arg.startswith("-j") and arg != "-j":
                 continue
-            if arg.startswith("--numprocesses="):
+            if arg.startswith("--jobs="):
                 continue
             if arg in positionals:
                 positionals.discard(arg)
@@ -117,28 +114,26 @@ class Coordinator:
             args.append(arg)
         return args
 
-    def _spawn(self, active: list[tuple[int, Path]]) -> list[tuple[int, Any, Path, Path]]:
+    def _spawn(self, active: list[tuple[int, list[str]]]) -> list[tuple[int, Any, Path, Path]]:
         from .worker import run_worker
 
         context = cast(Any, _multiprocessing_context())
-        forwarded_args = json.dumps(self._forwarded_args())
+        forwarded_args = self._forwarded_args()
         workers = []
-        for index, test_list in active:
+        for index, nodeids in active:
             result_path = self._work_dir / f"worker_{index}_results.jsonl"
             output_path = self._work_dir / f"worker_{index}_output.txt"
             result_path.touch()
             output_path.touch()
             env = os.environ.copy()
             env["PYTEST_PARALLEL_WORKER_ID"] = str(index)
-            env["_PYTEST_PARALLEL_ARGS"] = forwarded_args
-            env["_PYTEST_PARALLEL_NODEIDS"] = str(test_list)
-            env["_PYTEST_PARALLEL_OUTPUT"] = str(output_path)
-            env["_PYTEST_PARALLEL_RESULTS"] = str(result_path)
-            env["_PYTEST_PARALLEL_ROOTDIR"] = str(self.config.rootpath)
             env["_PYTEST_PARALLEL_WORKER"] = "1"
             self.config.hook.pytest_parallel_worker_env(env=env, worker_id=index)
 
-            process = context.Process(target=run_worker, args=(env,))
+            process = context.Process(
+                target=run_worker,
+                args=(env, nodeids, forwarded_args, str(self.config.rootpath), result_path, output_path),
+            )
             process.start()
             workers.append((index, process, result_path, output_path))
         return workers
@@ -172,6 +167,10 @@ class Coordinator:
             self._read_results(index, result_path, offsets, terminal, items_by_nodeid, reports, reports_by_nodeid)
 
         terminal.line(f"  {self._completed}/{self._total} completed, {self._failed} failed")
+        if self._failed_nodeids:
+            terminal.sep("-", "failed tests")
+            for nodeid in self._failed_nodeids:
+                terminal.line(nodeid, red=True)
 
         for index, process, _, output_path in workers:
             process.join()
@@ -185,6 +184,13 @@ class Coordinator:
             for report in reports:
                 terminal_reporter.stats.setdefault(report.outcome, []).append(report)
             session.config.pluginmanager.register(terminal_reporter, "terminalreporter")
+
+    @staticmethod
+    def _terminate_live_workers(workers: list[tuple[int, Any, Path, Path]]) -> None:
+        for _, process, _, _ in workers:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=1)
 
     def _read_results(
         self,
@@ -219,6 +225,7 @@ class Coordinator:
             self._completed += 1
         if outcome == "failed":
             self._failed += 1
+            self._failed_nodeids.append(nodeid)
 
         if self.config.option.verbose > 0:
             terminal.line(f"[w{worker_id}] {nodeid} {outcome.upper()} ({duration:.2f}s)")
@@ -252,6 +259,25 @@ def _multiprocessing_context() -> multiprocessing.context.BaseContext:
     if sys.platform.startswith("linux"):
         return multiprocessing.get_context("fork")
     return multiprocessing.get_context("spawn")
+
+
+def _assert_safe_to_start_workers() -> None:
+    if not sys.platform.startswith("linux"):
+        return
+
+    threads = _active_non_main_threads()
+    if threads:
+        names = ", ".join(thread.name for thread in threads)
+        raise pytest.UsageError(
+            "pytest-parallel cannot safely fork with active background threads. "
+            f"Active threads: {names}. Stop these threads before pytest_runtestloop, use --serial, "
+            "or run on a platform/start method that uses spawn."
+        )
+
+
+def _active_non_main_threads() -> list[threading.Thread]:
+    main_thread = threading.main_thread()
+    return [thread for thread in threading.enumerate() if thread is not main_thread and thread.is_alive()]
 
 
 def _coerce_outcome(value: object) -> ReportOutcome:

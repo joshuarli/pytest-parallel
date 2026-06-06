@@ -10,7 +10,7 @@ It intentionally does less than `pytest-xdist`:
 - No dynamic scheduler.
 - No remote execution.
 
-The coordinator collects tests once, assigns whole test files to fixed worker buckets, writes nodeid lists to temporary files, and starts worker processes with `multiprocessing`. Each worker calls `pytest.main()` with only its assigned nodeids and reports test outcomes back through a JSONL file.
+The coordinator collects tests once, assigns whole test files to fixed worker buckets, and starts worker processes with `multiprocessing`. Each worker calls `pytest.main()` with only its assigned nodeids and reports test outcomes back through a JSONL file.
 
 
 ## Usage
@@ -26,8 +26,8 @@ The default worker count is `auto`, which uses `os.cpu_count()`.
 To choose a worker count:
 
 ```bash
-pytest -n 4
-pytest --numprocesses 4
+pytest -j 4
+pytest --jobs 4
 ```
 
 To disable the plugin and use pytest's standard serial runner:
@@ -60,13 +60,15 @@ Do not call `multiprocessing.set_start_method()` globally. Choose the context in
 The fork/spawn point is deliberately late in pytest's coordinator process:
 
 1. Pytest configures plugins and completes collection.
-2. The coordinator partitions collected nodeids and writes shard files.
+2. The coordinator partitions collected nodeids.
 3. `pytest_parallel_pre_spawn` runs once for project-level setup.
 4. Workers are started immediately after that, before the coordinator starts result polling.
 
 On Linux, this means `fork` happens after collection but before any pytest test item is executed by the coordinator. On macOS, `spawn` avoids inheriting unsafe interpreter state from the pytest coordinator process.
 
-Project hooks should not leave background threads running from `pytest_parallel_pre_spawn`; forking a process with active threads is not safe.
+`pytest_runtestloop` is registered with `tryfirst=True`, so pytest-parallel reaches the fork/spawn decision before ordinary runtest-loop plugins execute tests. This cannot prevent other plugins from starting threads earlier during configure, session start, collection, or `pytest_parallel_pre_spawn`.
+
+On Linux, pytest-parallel checks for active non-main threads immediately before forking and raises `pytest.UsageError` if any are present. Project hooks should not leave background threads running from `pytest_parallel_pre_spawn`; forking a process with active threads is not safe.
 
 ## Hooks
 

@@ -30,10 +30,10 @@ def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:
 def pytest_addoption(parser: pytest.Parser) -> None:
     group = parser.getgroup("parallel", "static parallel test execution")
     group._addoption(
-        "-n",
-        "--numprocesses",
+        "-j",
+        "--jobs",
         default="auto",
-        dest="parallel_nprocs",
+        dest="parallel_jobs",
         help="Run tests across N worker processes. Defaults to 'auto'.",
     )
     group._addoption(
@@ -50,7 +50,7 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     if session.config.getoption("parallel_serial", default=False):
         return None
 
-    requested = _parse_numprocesses(session.config.getoption("parallel_nprocs", default="0"))
+    requested = _parse_jobs(session.config.getoption("parallel_jobs", default="0"))
     if requested <= 0 or os.environ.get("_PYTEST_PARALLEL_WORKER"):
         return None
 
@@ -59,7 +59,7 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     return Coordinator(session.config, requested).run(session)
 
 
-def _parse_numprocesses(value: object) -> int:
+def _parse_jobs(value: object) -> int:
     if isinstance(value, int):
         return value
     text = str(value).strip().lower()
