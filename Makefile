@@ -1,4 +1,4 @@
-.PHONY: build check lint test
+.PHONY: build check lint test release
 
 check:
 	uv run ruff format --check
@@ -16,3 +16,6 @@ test:
 
 build:
 	uv run python -m build --wheel
+
+release: build
+	uv run twine upload dist/*

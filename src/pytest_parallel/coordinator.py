@@ -16,7 +16,7 @@ from typing import Any, Literal, Protocol, cast
 
 import pytest
 
-from . import _DEFAULT_MAX_WORKERS
+from .plugin import _DEFAULT_MAX_WORKERS
 
 _OUTCOME_CHARS = {
     "failed": "F",
