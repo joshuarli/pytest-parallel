@@ -15,7 +15,7 @@ test:
 	uv run pytest tests/ -q
 
 build:
-	uv run python -m build --wheel
+	uv build --wheel
 
-release: build
-	uv run twine upload dist/*
+publish: build
+	vault UV_PUBLISH_USERNAME=__token__ UV_PUBLISH_PASSWORD -- uv publish

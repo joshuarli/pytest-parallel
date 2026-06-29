@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 _DEFAULT_MAX_WORKERS = 64
 
