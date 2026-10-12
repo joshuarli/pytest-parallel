@@ -1,4 +1,4 @@
-.PHONY: build check lint test release
+.PHONY: build check lint test publish
 
 check:
 	uv run ruff format --check
