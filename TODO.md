@@ -21,15 +21,6 @@ Next: 14
 - **Effort:** S (hours)
 - **Design:** [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
 
-### PAR-5 · P2 · Argument forwarding has conflicting option tables and drops custom plugin arguments
-
-- **Area:** Architecture
-- **Where:** `src/pytest_parallel/coordinator.py:62`, `src/pytest_parallel/coordinator.py:108`, `src/pytest_parallel/coordinator.py:359-408`
-- **Problem:** `_forwarded_args` re-parses CLI arguments with hardcoded option sets. `--rootdir` is present in both `_STRIP_VALUE_OPTIONS` (line 62) and `_KEEP_VALUE_OPTIONS` (line 108), leaving the latter unreachable. Options taking values from external pytest plugins (e.g. `--cov <path>`, `--report-log <file>`, `--ignore <path>`) are omitted from `_KEEP_VALUE_OPTIONS`; if their value matches any path in `known_args_namespace.file_or_dir`, it is dropped as a positional argument, corrupting the worker CLI.
-- **Recommendation:** Use Pytest's option parser or `known_args_namespace` to distinguish option arguments from positional test paths, and remove conflicting definitions.
-- **Fix with:** `api-surface-and-module-boundaries`
-- **Effort:** M (days)
-
 ### PAR-6 · P2 · Unhandled custom warning constructors crash coordinator event loop
 
 - **Area:** Errors
