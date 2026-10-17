@@ -1,5 +1,3 @@
-"""Worker process for pytest-parallel."""
-
 from __future__ import annotations
 
 import json

@@ -1,5 +1,3 @@
-"""Coordinator for static pytest worker shards."""
-
 from __future__ import annotations
 
 import json
@@ -62,9 +60,6 @@ class Coordinator:
             self.config.hook.pytest_parallel_pre_spawn(config=self.config, num_workers=num_workers)
 
             active = [(index, [item.nodeid for item in group]) for index, group in enumerate(groups) if group]
-            # Fork/spawn at the last possible point before monitoring starts. At this point
-            # pytest has completed collection, but the coordinator has not started polling
-            # loops or helper threads.
             _assert_safe_to_start_workers()
             workers = self._spawn(active)
             self._monitor(workers, {item.nodeid: item for item in session.items}, session)

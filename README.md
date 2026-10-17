@@ -1,37 +1,43 @@
 # pytest-parallel
 
-A small pytest plugin for static process-level sharding.
+`pytest-parallel` runs pytest tests in fixed worker processes. It requires Python 3.13 or newer.
+
+## Install
+
+```bash
+python -m pip install joshuarli-pytest-parallel
+```
+
+Pytest loads the plugin automatically after installation.
+
+## Run tests
 
 ```bash
 pytest
-```
-
-Parallel execution is enabled by default. The default job count is `auto`, using `os.cpu_count()`.
-
-```bash
 pytest -j 4
 pytest --jobs 4
 pytest --serial
 ```
 
-## Model
+Parallel execution is enabled by default. The default request, `auto`, uses `os.cpu_count()` or one worker if unavailable. The worker count is capped by the number of collected tests. The default cap is 64 workers. Use `-j` or `--jobs` to set the requested count. Use `--serial` to run pytest's standard serial runner.
 
-`pytest-parallel` keeps the execution model intentionally plain:
+The plugin prints worker progress and a pytest test summary. Add `-v` to show each worker ID, test node ID, outcome, and duration.
 
-- collect once in the coordinator
-- group tests by file
-- assign files round-robin to fixed workers
-- run each worker in a separate `multiprocessing` process
-- report results through simple JSONL files
+## Configure workers
 
-There is no work stealing, no execnet, no remote execution, and no scheduler protocol.
+Use these hooks in a pytest plugin or `conftest.py` to set a worker cap, prepare the project before workers start, or change each worker's environment:
 
-## Platform Policy
+```python
+def pytest_parallel_max_workers() -> int | None:
+    return 8
 
-- macOS uses `spawn`
-- Linux uses `fork`
-- other platforms use `spawn`
 
-The fork/spawn point is after collection and before coordinator result polling begins.
+def pytest_parallel_pre_spawn(config, num_workers: int) -> None:
+    ...
 
-On Linux, `pytest-parallel` refuses to fork if any non-main thread is alive at that point. That catches plugins that start background threads during configure, session start, collection, or `pytest_parallel_pre_spawn`.
+
+def pytest_parallel_worker_env(env: dict[str, str], worker_id: int) -> None:
+    env["TEST_WORKER_ID"] = str(worker_id)
+```
+
+See the [project repository](https://github.com/joshuarli/pytest-parallel) for help and the [MIT license](LICENSE).
