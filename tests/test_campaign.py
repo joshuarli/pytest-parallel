@@ -11,7 +11,6 @@ from unittest.mock import Mock
 import pytest
 
 from pytest_parallel.api import Shard
-from pytest_parallel.coordinator import Coordinator
 from pytest_parallel.scheduling import FileUnit, assign_units, merge_units
 
 
@@ -53,10 +52,14 @@ def test_default_balance_is_count_in_plugin() -> None:
     from pytest_parallel.plugin import _parse_balance
 
     assert _parse_balance("count") == "count"
-    buckets = Coordinator._partition(
-        [_item("a.py::t1"), _item("big.py::t1"), _item("big.py::t2"), _item("big.py::t3")], 2, balance="count"
-    )
-    assert next(i.nodeid for i in buckets[0]) == "big.py::t1"
+    light = FileUnit(path=Path("a.py"), key="a.py", ordinal=0)
+    light.items = [_item("a.py::t1")]
+    light.weight = 1.0
+    heavy = FileUnit(path=Path("big.py"), key="big.py", ordinal=1)
+    heavy.items = [_item("big.py::t1"), _item("big.py::t2"), _item("big.py::t3")]
+    heavy.weight = 3.0
+    buckets = assign_units(merge_units([light, heavy]), 2, balance="count")
+    assert buckets[0][0].items[0].nodeid == "big.py::t1"
 
 
 def test_lpt_deterministic_ties_and_round_robin_units() -> None:

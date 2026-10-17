@@ -232,10 +232,9 @@ def test_repeated_parallel_runs_have_deterministic_results(tmp_path: Path) -> No
 
 def measure_suite_benchmark(suite_dir: Path, extra_args: list[str], scratch_tmp: Path) -> dict[str, float]:
     import resource
-    from unittest.mock import Mock
 
-    from pytest_parallel.coordinator import Coordinator
     from pytest_parallel.plugin import BalanceStrategy
+    from pytest_parallel.scheduling import FileUnit, assign_units, merge_units
 
     collect_start = time.monotonic()
     subprocess.run(
@@ -261,16 +260,15 @@ def measure_suite_benchmark(suite_dir: Path, extra_args: list[str], scratch_tmp:
     cpu_time_s = (rusage_after.ru_utime - rusage_before.ru_utime) + (rusage_after.ru_stime - rusage_before.ru_stime)
 
     balance: BalanceStrategy = "count" if "--parallel-balance=count" in extra_args else "round-robin"
-    items = []
+    files: list[FileUnit] = []
     for file_path in sorted(suite_dir.glob("test_*.py")):
         count = int(file_path.stem.rsplit("_", 1)[-1])
-        for idx in range(count):
-            item = Mock()
-            item.nodeid = f"{file_path.name}::test_{idx}"
-            item.location = (file_path.name, 1, f"test_{idx}")
-            items.append(item)
-    buckets = Coordinator._partition(items, 2, balance=balance)
-    loads = [len(b) for b in buckets if b]
+        file_unit = FileUnit(path=file_path, key=file_path.name, ordinal=len(files))
+        file_unit.weight = float(count)
+        file_unit.items = list(range(count))
+        files.append(file_unit)
+    buckets = assign_units(merge_units(files), 2, balance=balance)
+    loads = [sum(unit.weight for unit in bucket) for bucket in buckets if bucket]
     mean_load = sum(loads) / len(loads) if loads else 1.0
     imbalance_ratio = max(loads) / mean_load if mean_load > 0 else 1.0
 
