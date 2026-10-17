@@ -21,15 +21,6 @@ Next: 14
 - **Effort:** S (hours)
 - **Design:** [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
 
-### PAR-12 · P3 · Build system requires pin upper bound triggers uv version warning
-
-- **Area:** Build
-- **Where:** `pyproject.toml:29`
-- **Problem:** `pyproject.toml` pins `requires = ["uv_build>=0.11.25,<0.12"]`. When running `uv build --wheel` with current `uv` (0.13.0+), uv outputs: `warning: build_system.requires = ["uv-build>=0.11.25,<0.12"] does not contain the current uv version 0.13.0`.
-- **Recommendation:** Widen the upper bound constraint in `build-system.requires` to permit `uv_build>=0.11.25,<0.14`.
-- **Fix with:** `upgrade`
-- **Effort:** S (hours)
-
 ### PAR-13 · P4 · Dead code main() and __main__ block in worker.py
 
 - **Area:** Dead code
