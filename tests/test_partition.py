@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock, patch
 
@@ -107,6 +108,50 @@ def test_forwarded_args_strips_jobs_options():
         args = coordinator._forwarded_args()
 
     assert args == ["-q"]
+
+
+def test_forwarded_args_sanitizes_ini_and_pytest_addopts(tmp_path, monkeypatch):
+    config = Mock()
+    config.known_args_namespace.file_or_dir = ["tests/", "from-ini", "from-env"]
+    config.invocation_params.args = ("tests/", "-k", "keep-me", "--log-file=cli.log")
+    config.invocation_params.plugins = ()
+    config.option = SimpleNamespace(basetemp=str(tmp_path / "base"), log_file="cli.log")
+    config.rootpath = tmp_path
+    config.getini = lambda name: {
+        "addopts": [
+            "-pcacheprovider",
+            "-p",
+            "pytest_cacheprovider",
+            "--junitxml=ini.xml",
+            "--basetemp",
+            str(tmp_path / "ini-base"),
+            "--lf",
+            "from-ini",
+            "-m",
+            "slow",
+        ],
+        "log_file": "ini.log",
+    }.get(name)
+    coordinator = Coordinator(cast(Any, config), 2)
+    monkeypatch.setenv(
+        "PYTEST_ADDOPTS",
+        f"-p pytest_cacheprovider --junit-xml=env.xml --basetemp={tmp_path / 'env-base'} from-env -q",
+    )
+
+    args = coordinator._forwarded_args(worker_id=1)
+
+    assert args == [
+        "-m",
+        "slow",
+        "-q",
+        "-k",
+        "keep-me",
+        "--override-ini=addopts=",
+        "--log-file=cli.worker-1.log",
+        "-p",
+        "no:cacheprovider",
+        f"--basetemp={tmp_path / 'base' / 'worker-1'}",
+    ]
 
 
 def test_multiprocessing_context_uses_spawn_on_macos():
@@ -246,7 +291,7 @@ def test_parallel_group_rejects_empty_or_non_string_names():
         Coordinator._partition(bad_kwarg, 1)
 
 
-def test_forwarded_args_uses_invocation_params_and_strips_coordinator_flags():
+def test_forwarded_args_uses_invocation_params_and_strips_coordinator_flags(tmp_path, monkeypatch):
     config = Mock()
     config.known_args_namespace.file_or_dir = ["tests/"]
     config.invocation_params.args = (
@@ -261,9 +306,32 @@ def test_forwarded_args_uses_invocation_params_and_strips_coordinator_flags():
         "--rootdir=/tmp",
         "-j2",
         "-v",
+        "-p",
+        "cacheprovider",
     )
-    config.invocation_params.plugins = ("my_custom_plugin",)
+    config.invocation_params.plugins = ("my_custom_plugin", "pytest_cacheprovider")
+    config.option = SimpleNamespace(basetemp=None, log_file=None)
+    config.getini = lambda name: [] if name == "addopts" else None
+    config.rootpath = tmp_path
     coordinator = Coordinator(cast(Any, config), 2)
+    coordinator._work_dir = tmp_path
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
 
     assert coordinator._forwarded_args() == ["-k", "tests/", "-v", "-p", "my_custom_plugin"]
+    worker_args = coordinator._forwarded_args(worker_id=0)
+    assert worker_args == [
+        "-k",
+        "tests/",
+        "-v",
+        "-p",
+        "my_custom_plugin",
+        "--override-ini=addopts=",
+        "--override-ini=log_file=",
+        "-p",
+        "no:cacheprovider",
+        f"--basetemp={tmp_path / 'basetemp' / 'worker-0'}",
+    ]
+    assert not any(arg.startswith(("--junitxml", "--junit-xml")) for arg in worker_args)
+    assert "cacheprovider" not in worker_args
+    assert "pytest_cacheprovider" not in worker_args
 

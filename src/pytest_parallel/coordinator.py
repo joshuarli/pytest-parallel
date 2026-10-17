@@ -5,6 +5,7 @@ import json
 import math
 import multiprocessing
 import os
+import shlex
 import shutil
 import signal
 import sys
@@ -85,6 +86,8 @@ _STRIP_PREFIX_OPTIONS: tuple[str, ...] = (
 )
 
 _STRIP_FLAG_OPTIONS: frozenset[str] = frozenset({"--lf", "--ff", "--nf", "--cache-clear", "--sw", "--stepwise"})
+
+_CACHE_PROVIDER_PLUGINS: frozenset[str] = frozenset({"cacheprovider", "pytest_cacheprovider"})
 
 _KEEP_VALUE_OPTIONS: frozenset[str] = frozenset(
     {
@@ -515,13 +518,48 @@ class Coordinator:
         return None
 
     def _forwarded_args(self, worker_id: int | None = None) -> list[str]:
+        positionals, parser_value_options = self._parser_context()
+        invocation = _sanitize_worker_args(
+            self._invocation_args(),
+            positionals=list(positionals),
+            parser_value_options=parser_value_options,
+        )
+        plugins = self._forwarded_plugins()
+        if worker_id is None:
+            return [*invocation, *plugins]
+
+        ini_addopts = _sanitize_worker_args(
+            self._ini_addopts(),
+            positionals=list(positionals),
+            parser_value_options=parser_value_options,
+        )
+        env_addopts = _sanitize_worker_args(
+            self._env_addopts(),
+            positionals=list(positionals),
+            parser_value_options=parser_value_options,
+        )
+        args = [*ini_addopts, *env_addopts, *invocation, *plugins, "--override-ini=addopts="]
+        log_file = self._configured_log_file()
+        if log_file:
+            log_path = Path(log_file)
+            per_worker = log_path.with_name(f"{log_path.stem}.worker-{worker_id}{log_path.suffix}")
+            args.append(f"--log-file={per_worker}")
+        else:
+            args.append("--override-ini=log_file=")
+        args.extend(["-p", "no:cacheprovider", f"--basetemp={self._worker_basetemp(worker_id)}"])
+        return args
+
+    def _invocation_args(self) -> list[str]:
         invocation_params = getattr(self.config, "invocation_params", None)
         raw_args = getattr(invocation_params, "args", None)
         if not isinstance(raw_args, tuple | list):
             raw_args = sys.argv[1:]
+        return [str(arg) for arg in raw_args]
 
+    def _parser_context(self) -> tuple[list[str], set[str]]:
         known = getattr(self.config, "known_args_namespace", None)
-        positionals = list(getattr(known, "file_or_dir", []) or [])
+        raw_positionals = getattr(known, "file_or_dir", []) or []
+        positionals = [str(path) for path in raw_positionals]
         parser_value_options: set[str] = set()
         parser = getattr(self.config, "_parser", None)
         optparser = getattr(parser, "optparser", None)
@@ -533,76 +571,77 @@ class Coordinator:
                 continue
             for opt in getattr(action, "option_strings", []) or []:
                 parser_value_options.add(str(opt))
+        return positionals, parser_value_options
 
-        args: list[str] = []
-        skip_next = False
-        keep_next = False
-        after_double_dash = False
+    def _ini_addopts(self) -> list[str]:
+        getini = getattr(self.config, "getini", None)
+        if not callable(getini):
+            return []
+        try:
+            value = getini("addopts")
+        except (TypeError, ValueError, KeyError):
+            return []
+        if isinstance(value, str):
+            return shlex.split(value)
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+            items: list[str] = []
+            for item in value:
+                if not isinstance(item, str):
+                    return []
+                items.append(item)
+            return items
+        return []
 
-        for raw_arg in raw_args:
-            arg = str(raw_arg)
-            if skip_next:
-                skip_next = False
-                continue
-            if keep_next:
-                keep_next = False
-                args.append(arg)
-                continue
-            if after_double_dash:
-                if arg in positionals:
-                    positionals.remove(arg)
-                    continue
-                args.append(arg)
-                continue
-            if arg == "--":
-                after_double_dash = True
-                continue
-            if arg in _STRIP_VALUE_OPTIONS:
-                skip_next = True
-                continue
-            if arg == "--serial":
-                continue
-            if arg in _STRIP_FLAG_OPTIONS:
-                continue
-            if arg.startswith("-j") and arg != "-j":
-                continue
-            if arg.startswith(_STRIP_PREFIX_OPTIONS):
-                continue
-            if arg in _KEEP_VALUE_OPTIONS or arg in parser_value_options:
-                args.append(arg)
-                keep_next = True
-                continue
-            if arg in positionals:
-                positionals.remove(arg)
-                continue
-            args.append(arg)
+    @staticmethod
+    def _env_addopts() -> list[str]:
+        raw = os.environ.get("PYTEST_ADDOPTS", "")
+        if not raw.strip():
+            return []
+        return shlex.split(raw)
 
+    def _forwarded_plugins(self) -> list[str]:
+        invocation_params = getattr(self.config, "invocation_params", None)
         plugins = getattr(invocation_params, "plugins", None)
-        if isinstance(plugins, Sequence) and not isinstance(plugins, str | bytes):
-            for plugin in plugins:
-                if isinstance(plugin, str):
-                    args.extend(["-p", plugin])
-                elif isinstance(plugin, types.ModuleType) and getattr(plugin, "__name__", None):
-                    args.extend(["-p", plugin.__name__])
-
-        if worker_id is not None:
-            args.extend(["-p", "no:cacheprovider"])
-            explicit_basetemp = self._explicit_option("basetemp")
-            if explicit_basetemp:
-                base = Path(explicit_basetemp)
-                if not base.is_absolute():
-                    rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
-                    base = rootpath / base
-                args.append(f"--basetemp={base / f'worker-{worker_id}'}")
-            else:
-                args.append(f"--basetemp={self._ensure_work_dir() / 'basetemp' / f'worker-{worker_id}'}")
-            explicit_log = self._explicit_option("log_file")
-            if explicit_log:
-                log_path = Path(explicit_log)
-                per_worker = log_path.with_name(f"{log_path.stem}.worker-{worker_id}{log_path.suffix}")
-                args.append(f"--log-file={per_worker}")
-
+        args: list[str] = []
+        if not isinstance(plugins, Sequence) or isinstance(plugins, str | bytes):
+            return args
+        for plugin in plugins:
+            name: str | None = None
+            if isinstance(plugin, str):
+                name = plugin
+            elif isinstance(plugin, types.ModuleType):
+                module_name = getattr(plugin, "__name__", None)
+                name = module_name if isinstance(module_name, str) else None
+            if name and name not in _CACHE_PROVIDER_PLUGINS:
+                args.extend(["-p", name])
         return args
+
+    def _configured_log_file(self) -> str | None:
+        cli_log = self._explicit_option("log_file")
+        if cli_log:
+            return cli_log
+        getini = getattr(self.config, "getini", None)
+        if not callable(getini):
+            return None
+        try:
+            value = getini("log_file")
+        except (TypeError, ValueError, KeyError):
+            return None
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    def _worker_basetemp(self, worker_id: int) -> Path:
+        explicit_basetemp = self._explicit_option("basetemp")
+        if explicit_basetemp:
+            base = Path(explicit_basetemp)
+            if not base.is_absolute():
+                rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+                base = rootpath / base
+            return base / f"worker-{worker_id}"
+        return self._ensure_work_dir() / "basetemp" / f"worker-{worker_id}"
 
     def _spawn(self, active: list[Any]) -> list[tuple[int, Any, Path, Path]]:
         from .worker import run_worker
@@ -630,6 +669,7 @@ class Coordinator:
                 result_path.touch()
                 output_path.touch()
                 env = os.environ.copy()
+                env.pop("PYTEST_ADDOPTS", None)
                 env["PYTEST_PARALLEL_WORKER_ID"] = str(index)
                 env["_PYTEST_PARALLEL_WORKER"] = "1"
                 if self.ramp > 0.0 and total_active > 1:
@@ -1398,6 +1438,80 @@ def _resolve_warning_category(module_name: str, qualname: str) -> type[Warning]:
             return obj
     short_name = qualname.rsplit(".", 1)[-1]
     return type(short_name, (Warning,), {"__module__": module_name, "__qualname__": qualname})
+
+
+def _attached_plugin_name(arg: str) -> str | None:
+    if not arg.startswith("-p") or arg.startswith("--") or arg in {"-p", "-p="}:
+        return None
+    name = arg[2:]
+    if not name:
+        return None
+    return name
+
+
+def _sanitize_worker_args(
+    raw_args: Sequence[object],
+    *,
+    positionals: list[str],
+    parser_value_options: set[str],
+) -> list[str]:
+    args: list[str] = []
+    raw = [str(arg) for arg in raw_args]
+    index = 0
+    after_double_dash = False
+    while index < len(raw):
+        arg = raw[index]
+        if after_double_dash:
+            if arg in positionals:
+                positionals.remove(arg)
+            else:
+                args.append(arg)
+            index += 1
+            continue
+        if arg == "--":
+            after_double_dash = True
+            index += 1
+            continue
+        if arg in _STRIP_VALUE_OPTIONS:
+            index += 2
+            continue
+        if arg == "--serial" or arg in _STRIP_FLAG_OPTIONS or arg.startswith(_STRIP_PREFIX_OPTIONS):
+            index += 1
+            continue
+        if arg.startswith("-j") and arg != "-j":
+            index += 1
+            continue
+        plugin_name = _attached_plugin_name(arg)
+        if plugin_name is not None:
+            if plugin_name not in _CACHE_PROVIDER_PLUGINS:
+                args.append(arg)
+            index += 1
+            continue
+        if arg == "-p":
+            if index + 1 >= len(raw):
+                args.append(arg)
+                index += 1
+                continue
+            plugin = raw[index + 1]
+            if plugin not in _CACHE_PROVIDER_PLUGINS:
+                args.extend((arg, plugin))
+            index += 2
+            continue
+        if arg in _KEEP_VALUE_OPTIONS or arg in parser_value_options:
+            args.append(arg)
+            if index + 1 < len(raw):
+                args.append(raw[index + 1])
+                index += 2
+            else:
+                index += 1
+            continue
+        if arg in positionals:
+            positionals.remove(arg)
+            index += 1
+            continue
+        args.append(arg)
+        index += 1
+    return args
 
 
 def _extract_parallel_groups(item: ShardItem) -> list[str]:
