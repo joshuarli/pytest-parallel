@@ -21,15 +21,6 @@ Next: 14
 - **Effort:** S (hours)
 - **Design:** [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
 
-### PAR-10 · P3 · Native and subprocess writes bypass output redirection when -s is used
-
-- **Area:** Operability
-- **Where:** `src/pytest_parallel/worker.py:267`, `src/pytest_parallel/worker.py:63-87`
-- **Problem:** `run_worker` redirects stdout and stderr using Python `contextlib.redirect_stdout` and `redirect_stderr`. These modify `sys.stdout` and `sys.stderr` in Python, but do not redirect OS file descriptors 1 and 2 (`os.dup2`). Any native extension (C/Cython/Rust) writing directly to fd 1 or child subprocesses inheriting descriptors bypass `output_path` and write directly to the parent terminal, causing scrambled terminal output.
-- **Recommendation:** Duplicate and redirect OS file descriptors 1 and 2 to `output_path` in `run_worker` via `os.dup2`.
-- **Fix with:** `os-boundaries`
-- **Effort:** S (hours)
-
 ### PAR-11 · P3 · Cascading diagnostic errors when test finish report is incomplete
 
 - **Area:** Errors
