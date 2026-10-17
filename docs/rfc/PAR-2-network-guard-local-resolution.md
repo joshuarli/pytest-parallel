@@ -1,38 +1,51 @@
-# PAR-2: Local hostname and unspecified interface resolution in network guard
+# PAR-2: Local servers can bind under the network guard
 
-Status: draft
+Status is accepted.
 
-## Summary
+## Only a worker installs the guard
 
-The network guard intercepts socket method calls and name resolvers to block network operations outside loopback. However, `_guard_resolver` treats `None`, `""`, and local hostnames as disallowed destinations, raising `PermissionError` on standard local server bindings.
+`pytest_runtest_protocol` calls `network_blocked()` only when `_PYTEST_PARALLEL_WORKER` is `1` and the test has no `enable_network` marker.
 
-## Motivation
+The coordinator sets that variable in each worker. The controller does not. `--serial` stays in the controller and keeps the normal socket API.
 
-Standard Python libraries and test servers (e.g., `http.server`, `urllib`, `asyncio.start_server`, Starlette, Werkzeug) use `socket.getaddrinfo(None, port, flags=socket.AI_PASSIVE)` or `socket.getaddrinfo("", port)` when binding test HTTP/gRPC listeners to local interfaces. Additionally, tests frequently resolve `socket.gethostname()` to test service identity.
+Mark a test with `@pytest.mark.enable_network` when that test must use the network. The marker skips the guard for that test only.
 
-Under `network_blocked()`, `_is_loopback_host(address)` returns `False` for `None`, `""`, and local machine hostnames, raising `PermissionError` and preventing standard local mock servers from running.
+## Local bind and the local hostname are allowed
 
-## Design
+An `AF_UNIX` socket is allowed.
 
-Update `_is_loopback_host` and `_guard_resolver` in `network.py`:
-1. If `address is None` or `address == ""`, allow resolution if `AI_PASSIVE` is set or the method is binding/listening locally.
-2. Cache the machine's local hostname via `socket.gethostname()` and recognize it as a local interface name.
-3. Keep external DNS resolutions and non-loopback IP connections blocked.
+A loopback host is allowed. That includes `localhost` and an IPv4-mapped loopback address.
 
-## Alternatives considered
+`bind`, `listen`, and `accept` may use an unspecified address. `0.0.0.0` and `::` are unspecified.
 
-- **Require `@pytest.mark.enable_network`:** Require any test setting up a local server with `None` or `""` to opt out of network protection entirely. This weakens isolation because actual outbound internet traffic would be permitted during that test.
-- **Allow all `getaddrinfo` calls:** Only guard `connect()` / `sendto()`. This would permit DNS leakage during tests.
+The guarded resolvers are `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`, `gethostbyaddr`, and `getnameinfo`.
 
-## Open questions
+A resolver call is allowed when the host is `None`, empty, loopback, unspecified, or the local hostname.
 
-1. Should binding to `0.0.0.0` (all IPv4 interfaces) or `::` (all IPv6 interfaces) be permitted by default, or restricted strictly to loopback (`127.0.0.1` / `::1`)?
-   - *Option A (Recommended):* Permit `0.0.0.0` and `::` for local `bind()` and `listen()` operations, but block `connect()` and outbound traffic.
-   - *Option B:* Strictly require `127.0.0.1` / `::1` for all socket binds under the guard.
-2. Should `socket.gethostname()` be automatically treated as loopback?
-   - *Option A (Recommended):* Yes, allow resolving the local machine's hostname.
-   - *Option B:* Require explicit `@pytest.mark.enable_network` for local hostname lookups.
+The local hostname is the string from `socket.gethostname()`. The guard also accepts that name's first label. The comparison is case-insensitive. A trailing dot on the queried name is ignored.
 
-## Decision
+The guard does not look at `AI_PASSIVE`. An empty host is allowed without that flag.
 
-Pending owner review.
+## Non-loopback connect and external lookup stay blocked
+
+`connect` and `connect_ex` raise `PermissionError` when the address is not loopback and is not the local hostname.
+
+`sendto` and `sendmsg` raise `PermissionError` when the explicit address is outside that set.
+
+A resolver call for any other host raises `PermissionError`.
+
+Passing the local hostname to `connect` is allowed. After `connect`, the guard caches `getpeername()`. If that peer is a non-loopback IP, the next `send` is blocked.
+
+`connect` to an unspecified address stays blocked.
+
+## These alternatives lost
+
+Requiring `enable_network` for every local server lost. The marker disables the guard for the whole test, so outbound `connect` calls would be allowed too.
+
+Allowing every `getaddrinfo` call lost. A test could resolve names outside the host.
+
+Allowing an empty host only with `AI_PASSIVE` lost. Libraries pass `None` or `""` without that flag.
+
+Refusing `0.0.0.0` and `::` lost. Local servers bind to those addresses and do not connect out.
+
+Refusing `socket.gethostname()` lost. Tests resolve that name for a service on this machine.
