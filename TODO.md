@@ -21,15 +21,6 @@ Next: 14
 - **Effort:** S (hours)
 - **Design:** [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
 
-### PAR-6 · P2 · Unhandled custom warning constructors crash coordinator event loop
-
-- **Area:** Errors
-- **Where:** `src/pytest_parallel/coordinator.py:900-907`, `src/pytest_parallel/coordinator.py:1172-1186`
-- **Problem:** When replaying worker warnings, `_handle_warning_event` dynamically resolves warning classes via `_resolve_warning_category` and instantiates them with `message=category(message_text)`. If a third-party library or test defines a custom `Warning` subclass whose `__init__` requires multiple positional arguments (e.g. `CustomWarning(code, msg)`), calling `category(message_text)` raises an unhandled `TypeError`, aborting `_read_worker_events` and crashing the entire test session.
-- **Recommendation:** Wrap warning class instantiation in a `try...except TypeError` block, falling back to `UserWarning(message_text)` or passing `message_text` directly.
-- **Fix with:** `error-model`
-- **Effort:** S (hours)
-
 ### PAR-7 · P2 · Missing SIGTERM handler in coordinator orphans worker subprocesses and leaks temp directories
 
 - **Area:** Concurrency
