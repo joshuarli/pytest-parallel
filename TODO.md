@@ -21,15 +21,6 @@ Next: 14
 - **Effort:** S (hours)
 - **Design:** [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
 
-### PAR-8 · P3 · Silent worker count cap of explicit -j to 64 without warning
-
-- **Area:** Config
-- **Where:** `src/pytest_parallel/coordinator.py:197`, `src/pytest_parallel/coordinator.py:233-241`, `src/pytest_parallel/plugin.py:12`
-- **Problem:** `_DEFAULT_MAX_WORKERS` is set to 64. When a user on a system with 96 or 128 cores explicitly passes `-j 128`, `min(self.requested_workers, len(units), max_workers)` silently caps the worker count to 64 unless a conftest hook is implemented. Silently reducing an explicit user-configured worker request violates user intent.
-- **Recommendation:** Apply `_DEFAULT_MAX_WORKERS` only to `--jobs=auto` calculations, or log a terminal warning when an explicit `--jobs` argument is clamped.
-- **Fix with:** `single-source-of-truth`
-- **Effort:** S (hours)
-
 ### PAR-9 · P3 · Working directory in system /tmp ignores pytest --basetemp
 
 - **Area:** OS
