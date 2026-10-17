@@ -23,6 +23,23 @@ Parallel execution is enabled by default. The default request, `auto`, uses `os.
 
 The plugin prints worker progress and a pytest test summary. Add `-v` to show each worker ID, test node ID, outcome, and duration.
 
+## Control network access
+
+Pytest-parallel blocks socket operations and hostname lookups outside loopback during each test. Loopback addresses and Unix domain sockets remain available. A blocked operation raises `PermissionError`.
+
+This guard intercepts Python's socket API. Native extensions and direct system calls can bypass it. Use an OS sandbox when you need a hard network boundary.
+
+Mark a test with `@pytest.mark.enable_network` to allow network access for that test:
+
+```python
+import pytest
+
+
+@pytest.mark.enable_network
+def test_fetch_remote_data():
+    ...
+```
+
 ## Configure workers
 
 Use these hooks in a pytest plugin or `conftest.py` to set a worker cap, prepare the project before workers start, or change each worker's environment:

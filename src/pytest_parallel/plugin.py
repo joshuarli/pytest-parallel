@@ -27,6 +27,10 @@ def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:
     pluginmanager.add_hookspecs(ParallelHookSpec)
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line("markers", "enable_network: allow network access during this test")
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     group = parser.getgroup("parallel", "static parallel test execution")
     group._addoption(
@@ -57,6 +61,18 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     from .coordinator import Coordinator
 
     return Coordinator(session.config, requested).run(session)
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None):
+    if item.get_closest_marker("enable_network") is not None:
+        yield
+        return
+
+    from .network import network_blocked
+
+    with network_blocked():
+        yield
 
 
 def _parse_jobs(value: object) -> int:
