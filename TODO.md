@@ -1,0 +1,121 @@
+Prefix: PAR
+Next: 14
+
+### PAR-1 · P2 · Abrupt worker SIGTERM preempts cooperative stop and teardown on -x/--maxfail
+
+- **Area:** Concurrency
+- **Where:** `src/pytest_parallel/coordinator.py:498-506`, `src/pytest_parallel/worker.py:48-50`
+- **Problem:** When `-x` or `--maxfail` triggers, the coordinator invokes `_terminate_live_workers()` on the same loop cycle that `stop_path` is touched. Workers never get an iteration to observe `_should_stop()`, set `session.shouldstop`, or execute fixture and context manager teardowns for in-flight tests before receiving `SIGTERM` / `SIGKILL`. Resources (database connections, open temp files, worker child processes) leak, and `_reconcile_worker` suppresses diagnostics because `global_stopped` is true.
+- **Recommendation:** Implement a bounded drain window after creating `stop_path` before escalating to SIGTERM, allowing active workers to finish teardown cooperatively.
+- **Fix with:** `lifecycle-concurrency`
+- **Effort:** M (days)
+- **Design:** [docs/rfc/PAR-1-cooperative-worker-shutdown.md](docs/rfc/PAR-1-cooperative-worker-shutdown.md)
+
+### PAR-2 · P2 · Network guard blocks valid local address resolution and server binding
+
+- **Area:** Security
+- **Where:** `src/pytest_parallel/network.py:110-122`, `src/pytest_parallel/network.py:124-142`
+- **Problem:** `_guard_resolver` intercepts `socket.getaddrinfo`, `socket.gethostbyname`, etc., and tests `_is_loopback_host(address)`. If `address` is `None` (used by standard libraries and web servers like `http.server` and Starlette with `AI_PASSIVE`), `""` (bind to all local interfaces), or the local machine hostname (`socket.gethostname()`), `_is_loopback_host` returns `False` and raises `PermissionError`. This breaks standard test suites setting up local mock servers or socket listeners without outbound traffic.
+- **Recommendation:** Allow `None`, `""`, and local hostnames in `_guard_resolver` when binding or listening locally.
+- **Fix with:** `os-boundaries`
+- **Effort:** S (hours)
+- **Design:** [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
+
+### PAR-3 · P2 · System call and IP parsing overhead on hot send and recv paths
+
+- **Area:** Performance
+- **Where:** `src/pytest_parallel/network.py:86-107`, `src/pytest_parallel/network.py:124-142`
+- **Problem:** `_SOCKET_METHODS` wraps every `recv`, `recv_into`, `send`, `sendall`, `sendfile`, `sendmsg`, and `sendto`. On every single chunk/call, `_targets_loopback` calls `sock.getpeername()` (a syscall) followed by `_is_loopback_host()`, which parses `ipaddress.ip_address()` with object allocation. A connected TCP socket's peer address is immutable. In test suites doing high-volume local socket I/O (local APIs, databases, streaming fixtures), calling a syscall and IP parser per chunk adds severe latency and CPU overhead.
+- **Recommendation:** Cache verified loopback status on connected socket instances upon `connect()` / `accept()` and skip per-chunk `getpeername()` and IP address parsing.
+- **Fix with:** `make-it-fast`
+- **Effort:** S (hours)
+
+### PAR-4 · P2 · --setup-plan flag swallows fixture execution plan and runs redundant workers
+
+- **Area:** Operability
+- **Where:** `src/pytest_parallel/plugin.py:105-107`, `src/pytest_parallel/coordinator.py:187-227`, `src/pytest_parallel/worker.py:267-270`
+- **Problem:** `--setup-plan` prints fixture execution plans without running tests. While `--collect-only` returns early in `plugin.py`, `--setup-plan` is not intercepted. It spawns parallel worker subprocesses that redirect their output to `output.txt` and run pytest with `--setup-plan`. Because no tests run or report, the output is swallowed and pytest-parallel exits with `no tests ran` and zero plan output displayed.
+- **Recommendation:** Intercept `--setup-plan` (`config.option.setupplan`) in `pytest_runtestloop` and return `None` (falling back to serial execution) or `True`.
+- **Fix with:** `isolate-effects`
+- **Effort:** S (hours)
+
+### PAR-5 · P2 · Argument forwarding has conflicting option tables and drops custom plugin arguments
+
+- **Area:** Architecture
+- **Where:** `src/pytest_parallel/coordinator.py:62`, `src/pytest_parallel/coordinator.py:108`, `src/pytest_parallel/coordinator.py:359-408`
+- **Problem:** `_forwarded_args` re-parses CLI arguments with hardcoded option sets. `--rootdir` is present in both `_STRIP_VALUE_OPTIONS` (line 62) and `_KEEP_VALUE_OPTIONS` (line 108), leaving the latter unreachable. Options taking values from external pytest plugins (e.g. `--cov <path>`, `--report-log <file>`, `--ignore <path>`) are omitted from `_KEEP_VALUE_OPTIONS`; if their value matches any path in `known_args_namespace.file_or_dir`, it is dropped as a positional argument, corrupting the worker CLI.
+- **Recommendation:** Use Pytest's option parser or `known_args_namespace` to distinguish option arguments from positional test paths, and remove conflicting definitions.
+- **Fix with:** `api-surface-and-module-boundaries`
+- **Effort:** M (days)
+
+### PAR-6 · P2 · Unhandled custom warning constructors crash coordinator event loop
+
+- **Area:** Errors
+- **Where:** `src/pytest_parallel/coordinator.py:900-907`, `src/pytest_parallel/coordinator.py:1172-1186`
+- **Problem:** When replaying worker warnings, `_handle_warning_event` dynamically resolves warning classes via `_resolve_warning_category` and instantiates them with `message=category(message_text)`. If a third-party library or test defines a custom `Warning` subclass whose `__init__` requires multiple positional arguments (e.g. `CustomWarning(code, msg)`), calling `category(message_text)` raises an unhandled `TypeError`, aborting `_read_worker_events` and crashing the entire test session.
+- **Recommendation:** Wrap warning class instantiation in a `try...except TypeError` block, falling back to `UserWarning(message_text)` or passing `message_text` directly.
+- **Fix with:** `error-model`
+- **Effort:** S (hours)
+
+### PAR-7 · P2 · Missing SIGTERM handler in coordinator orphans worker subprocesses and leaks temp directories
+
+- **Area:** Concurrency
+- **Where:** `src/pytest_parallel/coordinator.py:187-231`, `src/pytest_parallel/coordinator.py:516-519`
+- **Problem:** `Coordinator` catches `KeyboardInterrupt` (SIGINT) to terminate workers, but registers no handler for `SIGTERM`. When pytest runs in CI systems (GitHub Actions, Kubernetes pods) that enforce timeouts via `SIGTERM`, the coordinator process is killed immediately without unwinding Python frames or executing `finally:` blocks. Worker subprocesses continue executing as detached orphans and `/tmp/pytest_parallel_*` directories remain uncleaned.
+- **Recommendation:** Install a `SIGTERM` handler in `Coordinator.run()` that calls `_terminate_live_workers()` and cleans up `_work_dir` before exiting.
+- **Fix with:** `lifecycle-concurrency`
+- **Effort:** S (hours)
+
+### PAR-8 · P3 · Silent worker count cap of explicit -j to 64 without warning
+
+- **Area:** Config
+- **Where:** `src/pytest_parallel/coordinator.py:197`, `src/pytest_parallel/coordinator.py:233-241`, `src/pytest_parallel/plugin.py:12`
+- **Problem:** `_DEFAULT_MAX_WORKERS` is set to 64. When a user on a system with 96 or 128 cores explicitly passes `-j 128`, `min(self.requested_workers, len(units), max_workers)` silently caps the worker count to 64 unless a conftest hook is implemented. Silently reducing an explicit user-configured worker request violates user intent.
+- **Recommendation:** Apply `_DEFAULT_MAX_WORKERS` only to `--jobs=auto` calculations, or log a terminal warning when an explicit `--jobs` argument is clamped.
+- **Fix with:** `single-source-of-truth`
+- **Effort:** S (hours)
+
+### PAR-9 · P3 · Working directory in system /tmp ignores pytest --basetemp
+
+- **Area:** OS
+- **Where:** `src/pytest_parallel/coordinator.py:182-185`
+- **Problem:** `_ensure_work_dir()` creates `tempfile.mkdtemp(prefix="pytest_parallel_")` in the OS default temp directory (`/tmp` or `$TMPDIR`). It ignores Pytest's configured `--basetemp` option, which is explicitly used in CI and disk-constrained environments where `/tmp` is small, RAM-backed, or disallowed.
+- **Recommendation:** Check `self.config.option.basetemp` before creating temporary directories, creating the work directory inside `--basetemp` when specified.
+- **Fix with:** `os-boundaries`
+- **Effort:** S (hours)
+
+### PAR-10 · P3 · Native and subprocess writes bypass output redirection when -s is used
+
+- **Area:** Operability
+- **Where:** `src/pytest_parallel/worker.py:267`, `src/pytest_parallel/worker.py:63-87`
+- **Problem:** `run_worker` redirects stdout and stderr using Python `contextlib.redirect_stdout` and `redirect_stderr`. These modify `sys.stdout` and `sys.stderr` in Python, but do not redirect OS file descriptors 1 and 2 (`os.dup2`). Any native extension (C/Cython/Rust) writing directly to fd 1 or child subprocesses inheriting descriptors bypass `output_path` and write directly to the parent terminal, causing scrambled terminal output.
+- **Recommendation:** Duplicate and redirect OS file descriptors 1 and 2 to `output_path` in `run_worker` via `os.dup2`.
+- **Fix with:** `os-boundaries`
+- **Effort:** S (hours)
+
+### PAR-11 · P3 · Cascading diagnostic errors when test finish report is incomplete
+
+- **Area:** Errors
+- **Where:** `src/pytest_parallel/coordinator.py:841-853`, `src/pytest_parallel/coordinator.py:960-964`
+- **Problem:** In `_handle_test_finish_event`, if `setup` or `teardown` reports are missing, it appends a protocol error and returns early without resetting `state.current_test` or advancing `state.completed`. During reconciliation, `_reconcile_worker` sees `state.current_test is not None` and generates a secondary premature termination diagnostic that obscures the root protocol error.
+- **Recommendation:** Clear `state.current_test` and synthesize an explicit failure report on the missing phase so failure diagnostics accurately pinpoint the defect.
+- **Fix with:** `error-model`
+- **Effort:** S (hours)
+
+### PAR-12 · P3 · Build system requires pin upper bound triggers uv version warning
+
+- **Area:** Build
+- **Where:** `pyproject.toml:29`
+- **Problem:** `pyproject.toml` pins `requires = ["uv_build>=0.11.25,<0.12"]`. When running `uv build --wheel` with current `uv` (0.13.0+), uv outputs: `warning: build_system.requires = ["uv-build>=0.11.25,<0.12"] does not contain the current uv version 0.13.0`.
+- **Recommendation:** Widen the upper bound constraint in `build-system.requires` to permit `uv_build>=0.11.25,<0.14`.
+- **Fix with:** `upgrade`
+- **Effort:** S (hours)
+
+### PAR-13 · P4 · Dead code main() and __main__ block in worker.py
+
+- **Area:** Dead code
+- **Where:** `src/pytest_parallel/worker.py:237-239`, `src/pytest_parallel/worker.py:288-289`
+- **Problem:** `worker.py` defines `def main() -> None: sys.exit(pytest.main())` and an `if __name__ == "__main__":` entrypoint. Workers are spawned directly via `multiprocessing.Process(target=run_worker)`. Nothing in the package or test suite executes `worker.py` as a standalone script or calls `main()`.
+- **Recommendation:** Delete `main()` and `if __name__ == "__main__":` from `worker.py`.
+- **Fix with:** `dead-code-archaeology`
+- **Effort:** S (hours)

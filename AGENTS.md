@@ -22,3 +22,8 @@ A pytest plugin that collects in the parent session and assigns whole test files
 - Replay worker reports and warnings through standard pytest controller hooks (`pytest_runtest_logstart`, `pytest_runtest_logreport`, `pytest_runtest_logfinish`, `pytest_collectreport`, `pytest_warning_recorded`) and reconcile every assigned test's final state so premature exits, signals, or truncated streams never produce false-green runs.
 - Stop all workers cooperatively on global `-x` or `--maxfail`.
 - Keep pytest as the only runtime dependency.
+
+## RFCs
+
+- [docs/rfc/PAR-1-cooperative-worker-shutdown.md](docs/rfc/PAR-1-cooperative-worker-shutdown.md)
+- [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
