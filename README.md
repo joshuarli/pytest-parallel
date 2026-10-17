@@ -59,7 +59,7 @@ def test_migrations():
 
 Files connected by a shared group name merge transitively into a single schedulable unit in collection order. Files are never split across workers. Affinity means co-location on one worker, not exclusion of other tests from that worker. Grouping never mutates node IDs, and parametrized IDs containing `::`, `@`, or Unicode are preserved.
 
-Programmatic grouping from `conftest.py` (all implementations contribute, additively with markers):
+Programmatic grouping from `conftest.py` (all implementations in scope contribute, additively with markers). A `conftest.py` hook applies only to files in its directory and below. Plugins loaded with `-p` or an entry point apply to every file. A nested `pytest_parallel_shard_worker` runs only for a shard that contains a file under that directory, and each implementation runs once:
 
 ```python
 from pathlib import Path

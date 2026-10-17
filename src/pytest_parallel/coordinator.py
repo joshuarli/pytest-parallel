@@ -225,18 +225,19 @@ class Coordinator:
         return plan
 
     def _build_plan(self, items: Sequence[Any]) -> tuple[list[list[Any]], dict[str, Any], list[list[Unit]]]:
-        units = self._build_units(items)
+        session = getattr(items[0], "session", None) if items else None
+        units = self._build_units(items, session)
         max_workers = self._resolve_max_workers()
         self._effective_max_workers = max_workers
         num_workers = max(1, min(self.requested_workers, len(units), max_workers))
-        pins = self._resolve_pins(units, num_workers)
+        pins = self._resolve_pins(units, num_workers, session)
         buckets = assign_units(units, num_workers, balance=self.balance, pins=pins)
         rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
         plan = plan_dict(buckets, units, balance=self.balance, pins=pins, rootpath=rootpath)
         groups = [[item for unit in bucket for item in unit.items] for bucket in buckets]
         return groups, plan, buckets
 
-    def _build_units(self, items: Sequence[Any]) -> list[Unit]:
+    def _build_units(self, items: Sequence[Any], session: Any | None = None) -> list[Unit]:
         rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
         files: list[FileUnit] = []
         by_key: dict[str, FileUnit] = {}
@@ -249,8 +250,8 @@ class Coordinator:
                 files.append(file_unit)
             file_unit.items.append(item)
             file_unit.groups.update(_extract_parallel_groups(item))
-        hook = getattr(self.config, "hook", None)
         for file_unit in files:
+            hook = self._scoped_hook(session, self._absolute_file(file_unit))
             if hook is not None and hasattr(hook, "pytest_parallel_file_groups"):
                 try:
                     results = hook.pytest_parallel_file_groups(path=file_unit.path, items=list(file_unit.items))
@@ -272,15 +273,16 @@ class Coordinator:
             file_unit.weight = weight
         return merge_units(files)
 
-    def _resolve_pins(self, units: Sequence[Unit], num_workers: int) -> dict[int, int]:
+    def _resolve_pins(self, units: Sequence[Unit], num_workers: int, session: Any | None = None) -> dict[int, int]:
         hook = getattr(self.config, "hook", None)
         pins: dict[int, int] = {}
-        if hook is None or not hasattr(hook, "pytest_parallel_shard_worker"):
+        caller = getattr(hook, "pytest_parallel_shard_worker", None) if hook is not None else None
+        if caller is None:
             return pins
         for idx, unit in enumerate(units):
             shard = unit.shard()
             try:
-                results = hook.pytest_parallel_shard_worker(shard=shard, num_workers=num_workers)
+                results = self._shard_worker_results(caller, session, unit, num_workers)
             except AttributeError:
                 continue
             if not isinstance(results, list):
@@ -305,6 +307,53 @@ class Coordinator:
             if requested:
                 pins[idx] = next(iter(requested))
         return pins
+
+    def _scoped_hook(self, session: Any | None, path: Path) -> Any:
+        if session is not None:
+            get_proxy = getattr(session, "gethookproxy", None)
+            if callable(get_proxy):
+                return get_proxy(path)
+        return getattr(self.config, "hook", None)
+
+    def _absolute_file(self, file_unit: FileUnit) -> Path:
+        key_path = Path(file_unit.key)
+        if key_path.is_absolute():
+            return key_path
+        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+        return rootpath / file_unit.path
+
+    def _absolute_unit_path(self, path: Path) -> Path:
+        if path.is_absolute():
+            return path
+        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+        return rootpath / path
+
+    def _shard_worker_results(self, caller: Any, session: Any | None, unit: Unit, num_workers: int) -> list[Any]:
+        shard = unit.shard()
+        if session is None or not hasattr(caller, "get_hookimpls") or not hasattr(session, "gethookproxy"):
+            return list(caller(shard=shard, num_workers=num_workers) or [])
+        applicable: set[object] = set()
+        for path in unit.files:
+            proxy = session.gethookproxy(self._absolute_unit_path(path))
+            proxy_caller = getattr(proxy, "pytest_parallel_shard_worker", None)
+            if proxy_caller is None or not hasattr(proxy_caller, "get_hookimpls"):
+                continue
+            for impl in proxy_caller.get_hookimpls():
+                applicable.add(impl.function)
+        results: list[Any] = []
+        seen: set[object] = set()
+        for impl in caller.get_hookimpls():
+            function = impl.function
+            if function not in applicable or function in seen:
+                continue
+            if getattr(impl, "hookwrapper", False) or getattr(impl, "wrapper", False):
+                continue
+            seen.add(function)
+            argnames = tuple(getattr(impl, "argnames", ()) or ())
+            values = {"shard": shard, "num_workers": num_workers}
+            kwargs = values if not argnames else {name: value for name, value in values.items() if name in argnames}
+            results.append(function(**kwargs))
+        return results
 
     def run(self, session: pytest.Session) -> bool:
         workers: list[tuple[int, Any, Path, Path]] = []

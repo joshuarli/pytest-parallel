@@ -107,6 +107,70 @@ def test_hooks_weights_groups_and_pin_via_plan(tmp_path: Path) -> None:
     assert heavy[0]["weight"] == 10.0
 
 
+def test_conftest_hooks_stay_inside_their_directory(tmp_path: Path) -> None:
+    nested = tmp_path / "nested"
+    other = tmp_path / "other"
+    nested.mkdir()
+    other.mkdir()
+    (nested / "test_nested.py").write_text("def test_nested():\n assert True\n")
+    (other / "test_other.py").write_text("def test_other():\n assert True\n")
+    (tmp_path / "conftest.py").write_text(
+        "def pytest_parallel_file_groups(path, items):\n"
+        "    return [f'root-{path.name}']\n"
+        "def pytest_parallel_file_weight(path, items):\n"
+        "    return None\n"
+    )
+    calls = tmp_path / "shard_calls.txt"
+    (nested / "conftest.py").write_text(
+        "from pathlib import Path\n"
+        f"CALLS = Path({str(calls)!r})\n"
+        "def pytest_parallel_file_groups(path, items):\n"
+        "    return ['from-nested']\n"
+        "def pytest_parallel_file_weight(path, items):\n"
+        "    return 9.0\n"
+        "def pytest_parallel_shard_worker(shard, num_workers):\n"
+        "    with CALLS.open('a') as handle:\n"
+        "        handle.write(','.join(path.as_posix() for path in shard.files) + '\\n')\n"
+        "    return 0\n"
+    )
+    (tmp_path / "scope_plugin.py").write_text(
+        "def pytest_parallel_file_groups(path, items):\n"
+        "    return [f'plug-{path.name}']\n"
+        "def pytest_parallel_shard_worker(shard, num_workers):\n"
+        "    return None\n"
+    )
+    res = _run(
+        [str(tmp_path), "-j", "2", "--parallel-plan=json", "-p", "scope_plugin", "-q"],
+        tmp_path,
+    )
+    assert res.returncode == 0, res.stdout
+    plan = _plan_json(res.stdout)
+    units = [unit for worker in plan["workers"] for unit in worker["units"]]
+
+    def unit_for(suffix: str) -> dict:
+        matches = [unit for unit in units if any(str(path).endswith(suffix) for path in unit["files"])]
+        assert len(matches) == 1, units
+        return matches[0]
+
+    other_unit = unit_for("other/test_other.py")
+    nested_unit = unit_for("nested/test_nested.py")
+    assert "root-test_other.py" in other_unit["groups"]
+    assert "plug-test_other.py" in other_unit["groups"]
+    assert "from-nested" not in other_unit["groups"]
+    assert other_unit["weight"] == 1
+    assert other_unit["pinned"] is False
+    assert "root-test_nested.py" in nested_unit["groups"]
+    assert "plug-test_nested.py" in nested_unit["groups"]
+    assert "from-nested" in nested_unit["groups"]
+    assert nested_unit["weight"] == 9.0
+    assert nested_unit["pinned"] is True
+    assert nested_unit["worker"] == 0
+    lines = calls.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert lines[0].endswith("nested/test_nested.py")
+    assert "test_other" not in lines[0]
+
+
 def test_plan_text_runs_no_tests(tmp_path: Path) -> None:
     marker = tmp_path / "ran.txt"
     (tmp_path / "test_a.py").write_text(f"from pathlib import Path\ndef test_a():\n Path({str(marker)!r}).write_text('x')\n")
