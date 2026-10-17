@@ -58,6 +58,22 @@ jobs:
         uses: astral-sh/setup-uv@v5
       - name: Test against pytest pre-release
         run: |
+          set -euo pipefail
           uv sync
-          uv pip install --prerelease=allow "pytest>=9.1.dev0" || uv pip install pytest
-          uv run pytest tests/test_partition.py tests/test_options.py -q --serial
+          locked=$(uv run python -c 'import pytest; print(pytest.__version__)')
+          echo "locked=$locked"
+          uv pip install --prerelease=allow 'pytest>=9.1.dev0'
+          show=$(uv pip show pytest)
+          printf '%s\n' "$show"
+          shown=$(printf '%s\n' "$show" | python -c 'import sys; print(next(line.removeprefix("Version: ").strip() for line in sys.stdin if line.startswith("Version: ")))')
+          imported=$(uv run --no-sync python -c 'import pytest; print(pytest.__version__)')
+          echo "installed=$imported"
+          if [ "$shown" != "$imported" ]; then
+            echo "uv pip show pytest version $shown differs from imported $imported" >&2
+            exit 1
+          fi
+          if [ "$imported" = "$locked" ]; then
+            echo "imported pytest $imported is still the locked version" >&2
+            exit 1
+          fi
+          uv run --no-sync pytest tests/test_partition.py tests/test_options.py -q --serial
