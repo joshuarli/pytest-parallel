@@ -29,10 +29,10 @@ Parallel execution is enabled by default:
 - `--parallel-balance=count|round-robin`: Sharding strategy. `count` (default) uses largest-processing-time-first (LPT) bin packing by estimated weight (test count unless customized). `round-robin` assigns units in collection order. Both preserve relative file order per worker and test order within each file. There is no global execution-order guarantee across workers.
 - `--ramp=DURATION`: Stagger worker first-test start over a duration (e.g. `5s`, `1m`). The heaviest worker starts first; each worker waits at most once, after its own collection, and a stop request interrupts the wait. `--parallel-plan` never waits.
 - `--parallel-start-method=auto|fork|spawn|forkserver`: Multiprocessing start method. `auto` selects `forkserver` on Linux and `spawn` elsewhere. `forkserver`/`spawn` start workers from a fresh interpreter, so parent-side imported test modules cannot mask worker collection differences. Explicit `fork` remains available on Linux, but it inherits parent process state (including already-imported modules and threads) and is rejected while non-main threads are alive; treat it as an opt-in for suites that understand those semantics.
-- `--parallel-plan[=text|json]`: Print the resolved sharding plan (balance, workers, files, weights, groups, pinned vs automatic units, imbalance) and exit successfully without spawning workers or running tests. Collection errors remain errors. It cannot be combined with `--serial`, `-j 0`, or `--collect-only`.
+- `--parallel-plan[=text|json]`: Print the resolved sharding plan (balance, workers, files, weights, groups, pinned vs automatic units, imbalance) and exit successfully without spawning workers or running tests. `json` writes one JSON document, `version` 1, to stdout and sends diagnostics to stderr. Text mode keeps the normal terminal report. Collection errors remain errors. It cannot be combined with `--serial`, `-j 0`, or `--collect-only`.
 - `--serial` (or `-j 0`): Run tests serially using pytest's standard runner.
 
-Workers receive distinct per-worker `--basetemp` directories under one run-specific root (the explicitly configured `--basetemp`, with `worker-N` subdirectories, or a temporary run root when none is configured). The configured root itself is never cleared by more than one worker. Worker caches are disabled (`-p no:cacheprovider`) so concurrent workers cannot corrupt `.pytest_cache` or change `--lf`-style selection, which the parent collection already applied. A configured `--log-file` is written as one file per worker (`<name>.worker-N<ext>`). JUnit XML is produced once by the controller from replayed reports.
+Workers receive distinct per-worker `--basetemp` directories under one run-specific root (the explicitly configured `--basetemp`, with `worker-N` subdirectories, or a temporary run root when none is configured). The configured root itself is never a worker basetemp. Options inherited from ini `addopts` (pytest.ini, tox.ini, setup.cfg, or `pyproject.toml`) and `PYTEST_ADDOPTS` are placed on the worker command once, after coordinator flags, cache-selection flags, JUnit XML, `--log-file`, `--basetemp`, `--rootdir`, and cacheprovider plugin loads are removed. Worker caches are disabled (`-p no:cacheprovider`) so concurrent workers cannot corrupt `.pytest_cache` or change `--lf`-style selection, which the parent collection already applied. A configured log file, from `--log-file` or the ini `log_file` key, is written as one file per worker (`<name>.worker-N<ext>`). JUnit XML is produced once by the controller from replayed reports.
 
 ## Inspect the plan
 
@@ -42,7 +42,7 @@ pytest -j 8 --parallel-plan=json
 pytest --parallel-balance=round-robin --parallel-plan
 ```
 
-JSON output is a single deterministic object printed before pytest's summary. Extract it from the first `{` when automating.
+`--parallel-plan=json` writes exactly one JSON document to stdout, followed by a newline. `version` is 1. Parse it with `json.loads` on the whole stdout. Diagnostics, including the pytest header and the collection report, are on stderr. Text mode is unchanged.
 
 ## File affinity groups
 
@@ -59,7 +59,7 @@ def test_migrations():
 
 Files connected by a shared group name merge transitively into a single schedulable unit in collection order. Files are never split across workers. Affinity means co-location on one worker, not exclusion of other tests from that worker. Grouping never mutates node IDs, and parametrized IDs containing `::`, `@`, or Unicode are preserved.
 
-Programmatic grouping from `conftest.py` (all implementations contribute, additively with markers):
+Programmatic grouping from `conftest.py` (all implementations in scope contribute, additively with markers). A `conftest.py` hook applies only to files in its directory and below. Plugins loaded with `-p` or an entry point apply to every file. A nested `pytest_parallel_shard_worker` runs only for a shard that contains a file under that directory, and each implementation runs once:
 
 ```python
 from pathlib import Path

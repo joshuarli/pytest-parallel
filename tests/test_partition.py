@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import pytest
 
-from pytest_parallel.coordinator import Coordinator, _assert_safe_to_start_workers, _multiprocessing_context
+from pytest_parallel.coordinator import (
+    Coordinator,
+    _assert_safe_to_start_workers,
+    _extract_parallel_groups,
+    _multiprocessing_context,
+)
+from pytest_parallel.scheduling import FileUnit, assign_units, merge_units
 
 
 def _make_item(nodeid: str) -> Mock:
@@ -13,6 +21,24 @@ def _make_item(nodeid: str) -> Mock:
     item.nodeid = nodeid
     item.location = (nodeid.split("::")[0], None, nodeid)
     return item
+
+
+def _assigned_nodeids(items: list[Mock], num_workers: int, balance: str = "round-robin") -> list[list[str]]:
+    files: list[FileUnit] = []
+    by_key: dict[str, FileUnit] = {}
+    for item in items:
+        key = item.nodeid.partition("::")[0]
+        file_unit = by_key.get(key)
+        if file_unit is None:
+            file_unit = FileUnit(path=Path(key), key=key, ordinal=len(files))
+            by_key[key] = file_unit
+            files.append(file_unit)
+        file_unit.items.append(item)
+        file_unit.groups.update(_extract_parallel_groups(item))
+    for file_unit in files:
+        file_unit.weight = float(len(file_unit.items))
+    buckets = assign_units(merge_units(files), num_workers, balance=balance)
+    return [[item.nodeid for unit in bucket for item in unit.items] for bucket in buckets]
 
 
 def test_round_robin_preserves_file_order():
@@ -26,11 +52,11 @@ def test_round_robin_preserves_file_order():
         _make_item("e.py::test_1"),
     ]
 
-    buckets = Coordinator._partition(items, 3)
+    buckets = _assigned_nodeids(items, 3)
 
-    assert [item.nodeid for item in buckets[0]] == ["a.py::test_1", "a.py::test_2", "d.py::test_1"]
-    assert [item.nodeid for item in buckets[1]] == ["b.py::test_1", "e.py::test_1"]
-    assert [item.nodeid for item in buckets[2]] == ["c.py::test_1", "c.py::test_2"]
+    assert buckets[0] == ["a.py::test_1", "a.py::test_2", "d.py::test_1"]
+    assert buckets[1] == ["b.py::test_1", "e.py::test_1"]
+    assert buckets[2] == ["c.py::test_1", "c.py::test_2"]
 
 
 def test_preserves_test_order_within_file():
@@ -40,9 +66,9 @@ def test_preserves_test_order_within_file():
         _make_item("f.py::TestB::test_2"),
     ]
 
-    buckets = Coordinator._partition(items, 2)
+    buckets = _assigned_nodeids(items, 2)
 
-    assert [item.nodeid for item in buckets[0]] == [
+    assert buckets[0] == [
         "f.py::TestA::test_3",
         "f.py::TestA::test_1",
         "f.py::TestB::test_2",
@@ -53,7 +79,7 @@ def test_preserves_test_order_within_file():
 def test_single_worker_gets_everything():
     items = [_make_item(f"f{i}.py::test") for i in range(5)]
 
-    buckets = Coordinator._partition(items, 1)
+    buckets = _assigned_nodeids(items, 1)
 
     assert len(buckets) == 1
     assert len(buckets[0]) == 5
@@ -62,10 +88,10 @@ def test_single_worker_gets_everything():
 def test_more_workers_than_files():
     items = [_make_item("a.py::test_1"), _make_item("b.py::test_1")]
 
-    buckets = Coordinator._partition(items, 4)
+    buckets = _assigned_nodeids(items, 4)
 
-    assert [item.nodeid for item in buckets[0]] == ["a.py::test_1"]
-    assert [item.nodeid for item in buckets[1]] == ["b.py::test_1"]
+    assert buckets[0] == ["a.py::test_1"]
+    assert buckets[1] == ["b.py::test_1"]
     assert buckets[2] == []
     assert buckets[3] == []
 
@@ -107,6 +133,50 @@ def test_forwarded_args_strips_jobs_options():
         args = coordinator._forwarded_args()
 
     assert args == ["-q"]
+
+
+def test_forwarded_args_sanitizes_ini_and_pytest_addopts(tmp_path, monkeypatch):
+    config = Mock()
+    config.known_args_namespace.file_or_dir = ["tests/", "from-ini", "from-env"]
+    config.invocation_params.args = ("tests/", "-k", "keep-me", "--log-file=cli.log")
+    config.invocation_params.plugins = ()
+    config.option = SimpleNamespace(basetemp=str(tmp_path / "base"), log_file="cli.log")
+    config.rootpath = tmp_path
+    config.getini = lambda name: {
+        "addopts": [
+            "-pcacheprovider",
+            "-p",
+            "pytest_cacheprovider",
+            "--junitxml=ini.xml",
+            "--basetemp",
+            str(tmp_path / "ini-base"),
+            "--lf",
+            "from-ini",
+            "-m",
+            "slow",
+        ],
+        "log_file": "ini.log",
+    }.get(name)
+    coordinator = Coordinator(cast(Any, config), 2)
+    monkeypatch.setenv(
+        "PYTEST_ADDOPTS",
+        f"-p pytest_cacheprovider --junit-xml=env.xml --basetemp={tmp_path / 'env-base'} from-env -q",
+    )
+
+    args = coordinator._forwarded_args(worker_id=1)
+
+    assert args == [
+        "-m",
+        "slow",
+        "-q",
+        "-k",
+        "keep-me",
+        "--override-ini=addopts=",
+        "--log-file=cli.worker-1.log",
+        "-p",
+        "no:cacheprovider",
+        f"--basetemp={tmp_path / 'base' / 'worker-1'}",
+    ]
 
 
 def test_multiprocessing_context_uses_spawn_on_macos():
@@ -186,15 +256,15 @@ def test_count_balance_assigns_largest_files_first_and_preserves_order():
         _make_item("medium.py::test_2"),
     ]
 
-    buckets = Coordinator._partition(items, 2, balance="count")
+    buckets = _assigned_nodeids(items, 2, balance="count")
 
-    assert [item.nodeid for item in buckets[0]] == [
+    assert buckets[0] == [
         "heavy.py::test_1",
         "heavy.py::test_2",
         "heavy.py::test_3",
         "heavy.py::test_4",
     ]
-    assert [item.nodeid for item in buckets[1]] == [
+    assert buckets[1] == [
         "small_a.py::test_1",
         "small_b.py::test_1",
         "medium.py::test_1",
@@ -222,31 +292,31 @@ def test_parallel_group_combines_connected_files_without_mutating_nodeid():
         _make_marked_item("f4.py::test_d", [("cache",)]),
     ]
 
-    buckets = Coordinator._partition(items, 2)
+    buckets = _assigned_nodeids(items, 2)
 
-    assert [item.nodeid for item in buckets[0]] == [
+    assert buckets[0] == [
         "f1.py::test_a",
         "f3.py::test_c",
         "f4.py::test_d",
     ]
-    assert [item.nodeid for item in buckets[1]] == ["f2.py::test_b"]
+    assert buckets[1] == ["f2.py::test_b"]
 
 
 def test_parallel_group_rejects_empty_or_non_string_names():
     bad_empty = [_make_marked_item("f1.py::test_a", [("   ",)])]
     with pytest.raises(pytest.UsageError, match="non-empty"):
-        Coordinator._partition(bad_empty, 1)
+        _extract_parallel_groups(bad_empty[0])
 
     bad_no_args = [_make_marked_item("f1.py::test_a", [()])]
     with pytest.raises(pytest.UsageError, match="at least one"):
-        Coordinator._partition(bad_no_args, 1)
+        _extract_parallel_groups(bad_no_args[0])
 
     bad_kwarg = [_make_marked_item("f1.py::test_a", [("db",)], [{"extra": 1}])]
     with pytest.raises(pytest.UsageError, match="unexpected keyword"):
-        Coordinator._partition(bad_kwarg, 1)
+        _extract_parallel_groups(bad_kwarg[0])
 
 
-def test_forwarded_args_uses_invocation_params_and_strips_coordinator_flags():
+def test_forwarded_args_uses_invocation_params_and_strips_coordinator_flags(tmp_path, monkeypatch):
     config = Mock()
     config.known_args_namespace.file_or_dir = ["tests/"]
     config.invocation_params.args = (
@@ -261,9 +331,32 @@ def test_forwarded_args_uses_invocation_params_and_strips_coordinator_flags():
         "--rootdir=/tmp",
         "-j2",
         "-v",
+        "-p",
+        "cacheprovider",
     )
-    config.invocation_params.plugins = ("my_custom_plugin",)
+    config.invocation_params.plugins = ("my_custom_plugin", "pytest_cacheprovider")
+    config.option = SimpleNamespace(basetemp=None, log_file=None)
+    config.getini = lambda name: [] if name == "addopts" else None
+    config.rootpath = tmp_path
     coordinator = Coordinator(cast(Any, config), 2)
+    coordinator._work_dir = tmp_path
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
 
     assert coordinator._forwarded_args() == ["-k", "tests/", "-v", "-p", "my_custom_plugin"]
+    worker_args = coordinator._forwarded_args(worker_id=0)
+    assert worker_args == [
+        "-k",
+        "tests/",
+        "-v",
+        "-p",
+        "my_custom_plugin",
+        "--override-ini=addopts=",
+        "--override-ini=log_file=",
+        "-p",
+        "no:cacheprovider",
+        f"--basetemp={tmp_path / 'basetemp' / 'worker-0'}",
+    ]
+    assert not any(arg.startswith(("--junitxml", "--junit-xml")) for arg in worker_args)
+    assert "cacheprovider" not in worker_args
+    assert "pytest_cacheprovider" not in worker_args
 

@@ -5,6 +5,7 @@ import json
 import math
 import multiprocessing
 import os
+import shlex
 import shutil
 import signal
 import sys
@@ -24,6 +25,8 @@ from .plugin import _DEFAULT_MAX_WORKERS, BalanceStrategy, StartMethod
 from .scheduling import FileUnit, Unit, assign_units, format_plan_text, merge_units, plan_dict
 from .scheduling import validate_group_names as _validate_hook_groups
 from .scheduling import validate_weight as _validate_hook_weight
+
+PLAN_PRINTED = pytest.StashKey[bool]()
 
 ReportOutcome = Literal["passed", "failed", "skipped"]
 ReportPhase = Literal["setup", "call", "teardown"]
@@ -85,6 +88,8 @@ _STRIP_PREFIX_OPTIONS: tuple[str, ...] = (
 )
 
 _STRIP_FLAG_OPTIONS: frozenset[str] = frozenset({"--lf", "--ff", "--nf", "--cache-clear", "--sw", "--stepwise"})
+
+_CACHE_PROVIDER_PLUGINS: frozenset[str] = frozenset({"cacheprovider", "pytest_cacheprovider"})
 
 _KEEP_VALUE_OPTIONS: frozenset[str] = frozenset(
     {
@@ -206,15 +211,17 @@ class Coordinator:
         return self._work_dir
 
     def show_plan(self, session: pytest.Session, mode: str) -> bool:
+        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
         if not session.items:
-            plan = {"balance": self.balance, "num_workers": 0, "num_units": 0, "total_weight": 0.0, "imbalance": 0.0, "workers": []}
+            plan = plan_dict([], [], balance=self.balance, pins={}, rootpath=rootpath)
         else:
             _, plan, _ = self._build_plan(session.items)
-        terminal = session.config.get_terminal_writer()
         if mode == "json":
-            terminal.line(json.dumps(plan, indent=2, sort_keys=True))
+            sys.stdout.write(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+            sys.stdout.flush()
         else:
-            terminal.line(format_plan_text(plan))
+            session.config.get_terminal_writer().line(format_plan_text(plan))
+        self.config.stash[PLAN_PRINTED] = True
         return True
 
     def build_plan(self, items: Sequence[Any]) -> dict[str, Any]:
@@ -222,18 +229,19 @@ class Coordinator:
         return plan
 
     def _build_plan(self, items: Sequence[Any]) -> tuple[list[list[Any]], dict[str, Any], list[list[Unit]]]:
-        units = self._build_units(items)
+        session = getattr(items[0], "session", None) if items else None
+        units = self._build_units(items, session)
         max_workers = self._resolve_max_workers()
         self._effective_max_workers = max_workers
         num_workers = max(1, min(self.requested_workers, len(units), max_workers))
-        pins = self._resolve_pins(units, num_workers)
+        pins = self._resolve_pins(units, num_workers, session)
         buckets = assign_units(units, num_workers, balance=self.balance, pins=pins)
         rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
         plan = plan_dict(buckets, units, balance=self.balance, pins=pins, rootpath=rootpath)
         groups = [[item for unit in bucket for item in unit.items] for bucket in buckets]
         return groups, plan, buckets
 
-    def _build_units(self, items: Sequence[Any]) -> list[Unit]:
+    def _build_units(self, items: Sequence[Any], session: Any | None = None) -> list[Unit]:
         rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
         files: list[FileUnit] = []
         by_key: dict[str, FileUnit] = {}
@@ -246,8 +254,8 @@ class Coordinator:
                 files.append(file_unit)
             file_unit.items.append(item)
             file_unit.groups.update(_extract_parallel_groups(item))
-        hook = getattr(self.config, "hook", None)
         for file_unit in files:
+            hook = self._scoped_hook(session, self._absolute_file(file_unit))
             if hook is not None and hasattr(hook, "pytest_parallel_file_groups"):
                 try:
                     results = hook.pytest_parallel_file_groups(path=file_unit.path, items=list(file_unit.items))
@@ -269,15 +277,16 @@ class Coordinator:
             file_unit.weight = weight
         return merge_units(files)
 
-    def _resolve_pins(self, units: Sequence[Unit], num_workers: int) -> dict[int, int]:
+    def _resolve_pins(self, units: Sequence[Unit], num_workers: int, session: Any | None = None) -> dict[int, int]:
         hook = getattr(self.config, "hook", None)
         pins: dict[int, int] = {}
-        if hook is None or not hasattr(hook, "pytest_parallel_shard_worker"):
+        caller = getattr(hook, "pytest_parallel_shard_worker", None) if hook is not None else None
+        if caller is None:
             return pins
         for idx, unit in enumerate(units):
             shard = unit.shard()
             try:
-                results = hook.pytest_parallel_shard_worker(shard=shard, num_workers=num_workers)
+                results = self._shard_worker_results(caller, session, unit, num_workers)
             except AttributeError:
                 continue
             if not isinstance(results, list):
@@ -302,6 +311,53 @@ class Coordinator:
             if requested:
                 pins[idx] = next(iter(requested))
         return pins
+
+    def _scoped_hook(self, session: Any | None, path: Path) -> Any:
+        if session is not None:
+            get_proxy = getattr(session, "gethookproxy", None)
+            if callable(get_proxy):
+                return get_proxy(path)
+        return getattr(self.config, "hook", None)
+
+    def _absolute_file(self, file_unit: FileUnit) -> Path:
+        key_path = Path(file_unit.key)
+        if key_path.is_absolute():
+            return key_path
+        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+        return rootpath / file_unit.path
+
+    def _absolute_unit_path(self, path: Path) -> Path:
+        if path.is_absolute():
+            return path
+        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+        return rootpath / path
+
+    def _shard_worker_results(self, caller: Any, session: Any | None, unit: Unit, num_workers: int) -> list[Any]:
+        shard = unit.shard()
+        if session is None or not hasattr(caller, "get_hookimpls") or not hasattr(session, "gethookproxy"):
+            return list(caller(shard=shard, num_workers=num_workers) or [])
+        applicable: set[object] = set()
+        for path in unit.files:
+            proxy = session.gethookproxy(self._absolute_unit_path(path))
+            proxy_caller = getattr(proxy, "pytest_parallel_shard_worker", None)
+            if proxy_caller is None or not hasattr(proxy_caller, "get_hookimpls"):
+                continue
+            for impl in proxy_caller.get_hookimpls():
+                applicable.add(impl.function)
+        results: list[Any] = []
+        seen: set[object] = set()
+        for impl in caller.get_hookimpls():
+            function = impl.function
+            if function not in applicable or function in seen:
+                continue
+            if getattr(impl, "hookwrapper", False) or getattr(impl, "wrapper", False):
+                continue
+            seen.add(function)
+            argnames = tuple(getattr(impl, "argnames", ()) or ())
+            values = {"shard": shard, "num_workers": num_workers}
+            kwargs = values if not argnames else {name: value for name, value in values.items() if name in argnames}
+            results.append(function(**kwargs))
+        return results
 
     def run(self, session: pytest.Session) -> bool:
         workers: list[tuple[int, Any, Path, Path]] = []
@@ -416,95 +472,6 @@ class Coordinator:
                     "Pass --serial or register the plugin by module name with -p."
                 )
 
-    @staticmethod
-    def _schedulable_units(items: Sequence[ShardItem]) -> list[list[ShardItem]]:
-        by_file: dict[str, list[ShardItem]] = {}
-        file_order: list[str] = []
-        file_groups: list[set[str]] = []
-        file_index_by_name: dict[str, int] = {}
-
-        for item in items:
-            file_name = item.nodeid.partition("::")[0]
-            if file_name not in by_file:
-                file_index_by_name[file_name] = len(file_order)
-                by_file[file_name] = []
-                file_order.append(file_name)
-                file_groups.append(set())
-            by_file[file_name].append(item)
-            file_groups[file_index_by_name[file_name]].update(_extract_parallel_groups(item))
-
-        num_files = len(file_order)
-        parent = list(range(num_files))
-
-        def find(idx: int) -> int:
-            while parent[idx] != idx:
-                parent[idx] = parent[parent[idx]]
-                idx = parent[idx]
-            return idx
-
-        def union(a: int, b: int) -> None:
-            ra, rb = find(a), find(b)
-            if ra != rb:
-                low, high = (ra, rb) if ra < rb else (rb, ra)
-                parent[high] = low
-
-        first_file_for_group: dict[str, int] = {}
-        for file_idx, groups in enumerate(file_groups):
-            for group_name in groups:
-                if group_name in first_file_for_group:
-                    union(first_file_for_group[group_name], file_idx)
-                else:
-                    first_file_for_group[group_name] = file_idx
-
-        units_by_root: dict[int, list[ShardItem]] = {}
-        unit_order: list[int] = []
-        for file_idx, file_name in enumerate(file_order):
-            root = find(file_idx)
-            if root not in units_by_root:
-                units_by_root[root] = []
-                unit_order.append(root)
-            units_by_root[root].extend(by_file[file_name])
-
-        return [units_by_root[root] for root in unit_order]
-
-    @staticmethod
-    def _partition(
-        items: Sequence[ShardItem],
-        num_workers: int,
-        *,
-        balance: BalanceStrategy = "round-robin",
-    ) -> list[list[ShardItem]]:
-        units = Coordinator._schedulable_units(items)
-        return Coordinator._partition_units(units, num_workers, balance=balance)
-
-    @staticmethod
-    def _partition_units(
-        units: Sequence[Sequence[ShardItem]],
-        num_workers: int,
-        *,
-        balance: BalanceStrategy = "round-robin",
-    ) -> list[list[ShardItem]]:
-        buckets: list[list[ShardItem]] = [[] for _ in range(num_workers)]
-        if balance == "count":
-            sorted_unit_indices = sorted(range(len(units)), key=lambda idx: (-len(units[idx]), idx))
-            worker_loads = [0] * num_workers
-            worker_unit_indices: list[list[int]] = [[] for _ in range(num_workers)]
-            for unit_idx in sorted_unit_indices:
-                target_worker = min(
-                    range(num_workers),
-                    key=lambda w: (worker_loads[w], len(worker_unit_indices[w]), w),
-                )
-                worker_unit_indices[target_worker].append(unit_idx)
-                worker_loads[target_worker] += len(units[unit_idx])
-            for worker_id, unit_indices in enumerate(worker_unit_indices):
-                for unit_idx in sorted(unit_indices):
-                    buckets[worker_id].extend(units[unit_idx])
-            return buckets
-
-        for index, unit in enumerate(units):
-            buckets[index % num_workers].extend(unit)
-        return buckets
-
     def _explicit_option(self, name: str) -> str | None:
         option = getattr(self.config, "option", None)
         value = getattr(option, name, None) if option is not None else None
@@ -515,13 +482,48 @@ class Coordinator:
         return None
 
     def _forwarded_args(self, worker_id: int | None = None) -> list[str]:
+        positionals, parser_value_options = self._parser_context()
+        invocation = _sanitize_worker_args(
+            self._invocation_args(),
+            positionals=list(positionals),
+            parser_value_options=parser_value_options,
+        )
+        plugins = self._forwarded_plugins()
+        if worker_id is None:
+            return [*invocation, *plugins]
+
+        ini_addopts = _sanitize_worker_args(
+            self._ini_addopts(),
+            positionals=list(positionals),
+            parser_value_options=parser_value_options,
+        )
+        env_addopts = _sanitize_worker_args(
+            self._env_addopts(),
+            positionals=list(positionals),
+            parser_value_options=parser_value_options,
+        )
+        args = [*ini_addopts, *env_addopts, *invocation, *plugins, "--override-ini=addopts="]
+        log_file = self._configured_log_file()
+        if log_file:
+            log_path = Path(log_file)
+            per_worker = log_path.with_name(f"{log_path.stem}.worker-{worker_id}{log_path.suffix}")
+            args.append(f"--log-file={per_worker}")
+        else:
+            args.append("--override-ini=log_file=")
+        args.extend(["-p", "no:cacheprovider", f"--basetemp={self._worker_basetemp(worker_id)}"])
+        return args
+
+    def _invocation_args(self) -> list[str]:
         invocation_params = getattr(self.config, "invocation_params", None)
         raw_args = getattr(invocation_params, "args", None)
         if not isinstance(raw_args, tuple | list):
             raw_args = sys.argv[1:]
+        return [str(arg) for arg in raw_args]
 
+    def _parser_context(self) -> tuple[list[str], set[str]]:
         known = getattr(self.config, "known_args_namespace", None)
-        positionals = list(getattr(known, "file_or_dir", []) or [])
+        raw_positionals = getattr(known, "file_or_dir", []) or []
+        positionals = [str(path) for path in raw_positionals]
         parser_value_options: set[str] = set()
         parser = getattr(self.config, "_parser", None)
         optparser = getattr(parser, "optparser", None)
@@ -533,76 +535,77 @@ class Coordinator:
                 continue
             for opt in getattr(action, "option_strings", []) or []:
                 parser_value_options.add(str(opt))
+        return positionals, parser_value_options
 
-        args: list[str] = []
-        skip_next = False
-        keep_next = False
-        after_double_dash = False
+    def _ini_addopts(self) -> list[str]:
+        getini = getattr(self.config, "getini", None)
+        if not callable(getini):
+            return []
+        try:
+            value = getini("addopts")
+        except (TypeError, ValueError, KeyError):
+            return []
+        if isinstance(value, str):
+            return shlex.split(value)
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+            items: list[str] = []
+            for item in value:
+                if not isinstance(item, str):
+                    return []
+                items.append(item)
+            return items
+        return []
 
-        for raw_arg in raw_args:
-            arg = str(raw_arg)
-            if skip_next:
-                skip_next = False
-                continue
-            if keep_next:
-                keep_next = False
-                args.append(arg)
-                continue
-            if after_double_dash:
-                if arg in positionals:
-                    positionals.remove(arg)
-                    continue
-                args.append(arg)
-                continue
-            if arg == "--":
-                after_double_dash = True
-                continue
-            if arg in _STRIP_VALUE_OPTIONS:
-                skip_next = True
-                continue
-            if arg == "--serial":
-                continue
-            if arg in _STRIP_FLAG_OPTIONS:
-                continue
-            if arg.startswith("-j") and arg != "-j":
-                continue
-            if arg.startswith(_STRIP_PREFIX_OPTIONS):
-                continue
-            if arg in _KEEP_VALUE_OPTIONS or arg in parser_value_options:
-                args.append(arg)
-                keep_next = True
-                continue
-            if arg in positionals:
-                positionals.remove(arg)
-                continue
-            args.append(arg)
+    @staticmethod
+    def _env_addopts() -> list[str]:
+        raw = os.environ.get("PYTEST_ADDOPTS", "")
+        if not raw.strip():
+            return []
+        return shlex.split(raw)
 
+    def _forwarded_plugins(self) -> list[str]:
+        invocation_params = getattr(self.config, "invocation_params", None)
         plugins = getattr(invocation_params, "plugins", None)
-        if isinstance(plugins, Sequence) and not isinstance(plugins, str | bytes):
-            for plugin in plugins:
-                if isinstance(plugin, str):
-                    args.extend(["-p", plugin])
-                elif isinstance(plugin, types.ModuleType) and getattr(plugin, "__name__", None):
-                    args.extend(["-p", plugin.__name__])
-
-        if worker_id is not None:
-            args.extend(["-p", "no:cacheprovider"])
-            explicit_basetemp = self._explicit_option("basetemp")
-            if explicit_basetemp:
-                base = Path(explicit_basetemp)
-                if not base.is_absolute():
-                    rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
-                    base = rootpath / base
-                args.append(f"--basetemp={base / f'worker-{worker_id}'}")
-            else:
-                args.append(f"--basetemp={self._ensure_work_dir() / 'basetemp' / f'worker-{worker_id}'}")
-            explicit_log = self._explicit_option("log_file")
-            if explicit_log:
-                log_path = Path(explicit_log)
-                per_worker = log_path.with_name(f"{log_path.stem}.worker-{worker_id}{log_path.suffix}")
-                args.append(f"--log-file={per_worker}")
-
+        args: list[str] = []
+        if not isinstance(plugins, Sequence) or isinstance(plugins, str | bytes):
+            return args
+        for plugin in plugins:
+            name: str | None = None
+            if isinstance(plugin, str):
+                name = plugin
+            elif isinstance(plugin, types.ModuleType):
+                module_name = getattr(plugin, "__name__", None)
+                name = module_name if isinstance(module_name, str) else None
+            if name and name not in _CACHE_PROVIDER_PLUGINS:
+                args.extend(["-p", name])
         return args
+
+    def _configured_log_file(self) -> str | None:
+        cli_log = self._explicit_option("log_file")
+        if cli_log:
+            return cli_log
+        getini = getattr(self.config, "getini", None)
+        if not callable(getini):
+            return None
+        try:
+            value = getini("log_file")
+        except (TypeError, ValueError, KeyError):
+            return None
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    def _worker_basetemp(self, worker_id: int) -> Path:
+        explicit_basetemp = self._explicit_option("basetemp")
+        if explicit_basetemp:
+            base = Path(explicit_basetemp)
+            if not base.is_absolute():
+                rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+                base = rootpath / base
+            return base / f"worker-{worker_id}"
+        return self._ensure_work_dir() / "basetemp" / f"worker-{worker_id}"
 
     def _spawn(self, active: list[Any]) -> list[tuple[int, Any, Path, Path]]:
         from .worker import run_worker
@@ -630,6 +633,7 @@ class Coordinator:
                 result_path.touch()
                 output_path.touch()
                 env = os.environ.copy()
+                env.pop("PYTEST_ADDOPTS", None)
                 env["PYTEST_PARALLEL_WORKER_ID"] = str(index)
                 env["_PYTEST_PARALLEL_WORKER"] = "1"
                 if self.ramp > 0.0 and total_active > 1:
@@ -1398,6 +1402,80 @@ def _resolve_warning_category(module_name: str, qualname: str) -> type[Warning]:
             return obj
     short_name = qualname.rsplit(".", 1)[-1]
     return type(short_name, (Warning,), {"__module__": module_name, "__qualname__": qualname})
+
+
+def _attached_plugin_name(arg: str) -> str | None:
+    if not arg.startswith("-p") or arg.startswith("--") or arg in {"-p", "-p="}:
+        return None
+    name = arg[2:]
+    if not name:
+        return None
+    return name
+
+
+def _sanitize_worker_args(
+    raw_args: Sequence[object],
+    *,
+    positionals: list[str],
+    parser_value_options: set[str],
+) -> list[str]:
+    args: list[str] = []
+    raw = [str(arg) for arg in raw_args]
+    index = 0
+    after_double_dash = False
+    while index < len(raw):
+        arg = raw[index]
+        if after_double_dash:
+            if arg in positionals:
+                positionals.remove(arg)
+            else:
+                args.append(arg)
+            index += 1
+            continue
+        if arg == "--":
+            after_double_dash = True
+            index += 1
+            continue
+        if arg in _STRIP_VALUE_OPTIONS:
+            index += 2
+            continue
+        if arg == "--serial" or arg in _STRIP_FLAG_OPTIONS or arg.startswith(_STRIP_PREFIX_OPTIONS):
+            index += 1
+            continue
+        if arg.startswith("-j") and arg != "-j":
+            index += 1
+            continue
+        plugin_name = _attached_plugin_name(arg)
+        if plugin_name is not None:
+            if plugin_name not in _CACHE_PROVIDER_PLUGINS:
+                args.append(arg)
+            index += 1
+            continue
+        if arg == "-p":
+            if index + 1 >= len(raw):
+                args.append(arg)
+                index += 1
+                continue
+            plugin = raw[index + 1]
+            if plugin not in _CACHE_PROVIDER_PLUGINS:
+                args.extend((arg, plugin))
+            index += 2
+            continue
+        if arg in _KEEP_VALUE_OPTIONS or arg in parser_value_options:
+            args.append(arg)
+            if index + 1 < len(raw):
+                args.append(raw[index + 1])
+                index += 2
+            else:
+                index += 1
+            continue
+        if arg in positionals:
+            positionals.remove(arg)
+            index += 1
+            continue
+        args.append(arg)
+        index += 1
+    return args
 
 
 def _extract_parallel_groups(item: ShardItem) -> list[str]:

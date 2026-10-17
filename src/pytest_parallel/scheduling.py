@@ -183,6 +183,7 @@ def plan_dict(
             }
         )
     return {
+        "version": 1,
         "balance": balance,
         "num_workers": len(buckets),
         "num_units": len(units),

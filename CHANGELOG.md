@@ -6,13 +6,14 @@
 
 - Make count-balanced LPT (`--parallel-balance=count`) the default; `round-robin` remains an explicit opt-out. Scheduling is deterministic (weight, collection position, then worker index) and restores relative file order per worker.
 - Add the public customization hooks `pytest_parallel_file_groups`, `pytest_parallel_file_weight` (first non-`None` result), and `pytest_parallel_shard_worker` (conflicting pins are rejected), plus the frozen `pytest_parallel.api.Shard` type. Invalid weights, group names, and pins raise `pytest.UsageError` before workers spawn.
-- Add `--parallel-plan[=text|json]` to print the resolved plan without running tests or spawning workers.
+- Add `--parallel-plan[=text|json]` to print the resolved plan without running tests or spawning workers. JSON mode writes one versioned document to stdout and leaves diagnostics on stderr.
 - Start the heaviest worker first under `--ramp`; ramping still waits at most once per worker, after collection.
 
 ### Correctness and reliability
 
 - Default to `forkserver` on Linux (fresh interpreter, like `spawn`) so parent-imported modules cannot mask worker collection mismatches. Explicit `fork` remains available with documented inherited-state semantics.
-- Give each worker a distinct `--basetemp` under one run root, disable worker cacheproviders, strip cache-selection flags from worker arguments, and write per-worker `--log-file` outputs. Only the controller writes JUnit XML.
+- Give each worker a distinct `--basetemp` under one run root, disable worker cacheproviders, strip cache-selection flags from worker arguments, and write per-worker log files. Only the controller writes JUnit XML. Ini `addopts`, `pyproject.toml`, and `PYTEST_ADDOPTS` are sanitized the same way, so workers do not reload cacheprovider, reopen the controller JUnit file, or share one basetemp or log file.
+- Apply `pytest_parallel_file_groups` and `pytest_parallel_file_weight` only inside the conftest directory that defines them. A conftest `pytest_parallel_shard_worker` pins a shard only when that shard contains a file under its directory.
 - Make global `-x`/`--maxfail` genuinely cooperative: workers stop starting tests, in-flight tests complete teardowns and reports during a bounded 5s drain, and unexecuted tests are not synthesized as crashes. SIGTERM now follows the same cleanup path as SIGINT.
 - Guard the network only inside parallel workers; serial pytest keeps standard socket behavior. Local listeners (`None`/`""`/unspecified bind addresses, local hostname) work under the guard.
 - Reject combining pytest-parallel distribution with xdist `-n`, run `--setup-plan` through the serial runner, report explicit worker-count caps, and fall back safely when a worker warning class cannot be constructed from its message.

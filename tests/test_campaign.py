@@ -11,7 +11,6 @@ from unittest.mock import Mock
 import pytest
 
 from pytest_parallel.api import Shard
-from pytest_parallel.coordinator import Coordinator
 from pytest_parallel.scheduling import FileUnit, assign_units, merge_units
 
 
@@ -22,14 +21,14 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
-def _run(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def _run(args: list[str], cwd: Path, *, merge_output: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "pytest", *args],
         cwd=cwd,
         check=False,
         text=True,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.STDOUT if merge_output else subprocess.PIPE,
         env=_clean_env(),
     )
 
@@ -53,10 +52,14 @@ def test_default_balance_is_count_in_plugin() -> None:
     from pytest_parallel.plugin import _parse_balance
 
     assert _parse_balance("count") == "count"
-    buckets = Coordinator._partition(
-        [_item("a.py::t1"), _item("big.py::t1"), _item("big.py::t2"), _item("big.py::t3")], 2, balance="count"
-    )
-    assert next(i.nodeid for i in buckets[0]) == "big.py::t1"
+    light = FileUnit(path=Path("a.py"), key="a.py", ordinal=0)
+    light.items = [_item("a.py::t1")]
+    light.weight = 1.0
+    heavy = FileUnit(path=Path("big.py"), key="big.py", ordinal=1)
+    heavy.items = [_item("big.py::t1"), _item("big.py::t2"), _item("big.py::t3")]
+    heavy.weight = 3.0
+    buckets = assign_units(merge_units([light, heavy]), 2, balance="count")
+    assert buckets[0][0].items[0].nodeid == "big.py::t1"
 
 
 def test_lpt_deterministic_ties_and_round_robin_units() -> None:
@@ -105,6 +108,106 @@ def test_hooks_weights_groups_and_pin_via_plan(tmp_path: Path) -> None:
     assert all(u["worker"] == 1 and u["pinned"] for u in db_units)
     heavy = [u for w in plan["workers"] for u in w["units"] if u["files"] == ["test_heavy.py"]]
     assert heavy[0]["weight"] == 10.0
+
+
+def test_conftest_hooks_stay_inside_their_directory(tmp_path: Path) -> None:
+    nested = tmp_path / "nested"
+    other = tmp_path / "other"
+    nested.mkdir()
+    other.mkdir()
+    (nested / "test_nested.py").write_text("def test_nested():\n assert True\n")
+    (other / "test_other.py").write_text("def test_other():\n assert True\n")
+    (tmp_path / "conftest.py").write_text(
+        "def pytest_parallel_file_groups(path, items):\n"
+        "    return [f'root-{path.name}']\n"
+        "def pytest_parallel_file_weight(path, items):\n"
+        "    return None\n"
+    )
+    calls = tmp_path / "shard_calls.txt"
+    (nested / "conftest.py").write_text(
+        "from pathlib import Path\n"
+        f"CALLS = Path({str(calls)!r})\n"
+        "def pytest_parallel_file_groups(path, items):\n"
+        "    return ['from-nested']\n"
+        "def pytest_parallel_file_weight(path, items):\n"
+        "    return 9.0\n"
+        "def pytest_parallel_shard_worker(shard, num_workers):\n"
+        "    with CALLS.open('a') as handle:\n"
+        "        handle.write(','.join(path.as_posix() for path in shard.files) + '\\n')\n"
+        "    return 0\n"
+    )
+    (tmp_path / "scope_plugin.py").write_text(
+        "def pytest_parallel_file_groups(path, items):\n"
+        "    return [f'plug-{path.name}']\n"
+        "def pytest_parallel_shard_worker(shard, num_workers):\n"
+        "    return None\n"
+    )
+    res = _run(
+        [str(tmp_path), "-j", "2", "--parallel-plan=json", "-p", "scope_plugin", "-q"],
+        tmp_path,
+    )
+    assert res.returncode == 0, res.stdout
+    plan = _plan_json(res.stdout)
+    units = [unit for worker in plan["workers"] for unit in worker["units"]]
+
+    def unit_for(suffix: str) -> dict:
+        matches = [unit for unit in units if any(str(path).endswith(suffix) for path in unit["files"])]
+        assert len(matches) == 1, units
+        return matches[0]
+
+    other_unit = unit_for("other/test_other.py")
+    nested_unit = unit_for("nested/test_nested.py")
+    assert "root-test_other.py" in other_unit["groups"]
+    assert "plug-test_other.py" in other_unit["groups"]
+    assert "from-nested" not in other_unit["groups"]
+    assert other_unit["weight"] == 1
+    assert other_unit["pinned"] is False
+    assert "root-test_nested.py" in nested_unit["groups"]
+    assert "plug-test_nested.py" in nested_unit["groups"]
+    assert "from-nested" in nested_unit["groups"]
+    assert nested_unit["weight"] == 9.0
+    assert nested_unit["pinned"] is True
+    assert nested_unit["worker"] == 0
+    lines = calls.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert lines[0].endswith("nested/test_nested.py")
+    assert "test_other" not in lines[0]
+
+
+def test_json_plan_stdout_is_one_document(tmp_path: Path) -> None:
+    (tmp_path / "test_a.py").write_text("def test_a():\n assert True\n")
+    (tmp_path / "test_b.py").write_text("def test_b():\n assert True\n")
+    res = _run([str(tmp_path), "-j", "2", "--parallel-plan=json"], tmp_path, merge_output=False)
+    assert res.returncode == 0, res.stderr
+    plan = json.loads(res.stdout)
+    assert plan["version"] == 1
+    assert res.stdout == json.dumps(plan, indent=2, sort_keys=True) + "\n"
+    assert "platform" not in res.stdout
+    assert "collected" not in res.stdout
+    assert "platform" in res.stderr
+    assert "collected" in res.stderr
+
+
+def test_json_plan_collection_error_is_nonzero(tmp_path: Path) -> None:
+    (tmp_path / "test_bad.py").write_text("def test_bad(\n")
+    res = _run([str(tmp_path), "-j", "2", "--parallel-plan=json"], tmp_path, merge_output=False)
+    assert res.returncode != 0
+    assert res.stdout.strip() == ""
+    assert "platform" not in res.stdout
+    assert "collected" not in res.stdout
+
+
+def test_json_plan_empty_collection_exits_zero(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    res = _run([str(empty), "-j", "2", "--parallel-plan=json"], empty, merge_output=False)
+    assert res.returncode == 0, res.stderr
+    plan = json.loads(res.stdout)
+    assert plan["version"] == 1
+    assert plan["num_units"] == 0
+    assert plan["num_workers"] == 0
+    assert plan["workers"] == []
+    assert res.stdout == json.dumps(plan, indent=2, sort_keys=True) + "\n"
 
 
 def test_plan_text_runs_no_tests(tmp_path: Path) -> None:

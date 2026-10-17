@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -22,7 +23,14 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
-def _run(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    args: list[str],
+    cwd: Path,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = _clean_env()
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, "-m", "pytest", *args],
         cwd=cwd,
@@ -30,7 +38,7 @@ def _run(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        env=_clean_env(),
+        env=env,
     )
 
 
@@ -187,3 +195,121 @@ def test_sigterm_reaps_worker_and_removes_work_dir(tmp_path: Path) -> None:
     else:
         raise AssertionError(f"worker {worker_pid} still alive")
     assert list(scratch.glob("pytest_parallel_*")) == []
+
+
+def _worker_isolation_suite(root: Path, junit: Path) -> None:
+    root.mkdir()
+    (root / "markers").mkdir()
+    for idx in (0, 1):
+        (root / f"test_w{idx}.py").write_text(
+            "import os\n"
+            "from pathlib import Path\n"
+            "def test_worker(request, tmp_path):\n"
+            "    assert request.config.pluginmanager.get_plugin('cacheprovider') is None\n"
+            f"    assert not Path({str(junit)!r}).exists()\n"
+            "    text = str(tmp_path)\n"
+            "    assert 'worker-' in text\n"
+            f"    Path({str(root / 'markers')!r}, os.environ['PYTEST_PARALLEL_WORKER_ID']).write_text(text)\n"
+        )
+
+
+def _assert_isolated_workers(root: Path, base: Path, junit: Path, result: subprocess.CompletedProcess[str]) -> None:
+    assert result.returncode == 0, result.stdout
+    assert (base / "sentinel.txt").is_file()
+    assert (base / "worker-0").is_dir()
+    assert (base / "worker-1").is_dir()
+    temps = {(root / "markers" / str(idx)).read_text() for idx in (0, 1)}
+    assert len(temps) == 2
+    assert all(Path(temp) != base and base in Path(temp).parents for temp in temps)
+    assert junit.is_file()
+
+
+def _quoted_addopts(cache_flag: str, junit: Path, base: Path) -> str:
+    return " ".join(
+        (
+            cache_flag,
+            f"--junitxml={shlex.quote(str(junit))}",
+            f"--basetemp={shlex.quote(str(base))}",
+        )
+    )
+
+
+def test_pytest_ini_addopts_do_not_leak_into_workers(tmp_path: Path) -> None:
+    root = tmp_path / "suite"
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "sentinel.txt").write_text("keep")
+    junit = root / "shared-junit.xml"
+    _worker_isolation_suite(root, junit)
+    (root / "pytest.ini").write_text(f"[pytest]\naddopts = {_quoted_addopts('-pcacheprovider', junit, base)}\n")
+    result = _run([str(root), "-j", "2", "-q"], root)
+    _assert_isolated_workers(root, base, junit, result)
+
+
+def test_pyproject_addopts_do_not_leak_into_workers(tmp_path: Path) -> None:
+    root = tmp_path / "suite"
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "sentinel.txt").write_text("keep")
+    junit = root / "shared-junit.xml"
+    _worker_isolation_suite(root, junit)
+    addopts = _quoted_addopts("-p cacheprovider", junit, base)
+    (root / "pyproject.toml").write_text(f"[tool.pytest.ini_options]\naddopts = {addopts!r}\n")
+    result = _run([str(root), "-j", "2", "-q"], root)
+    _assert_isolated_workers(root, base, junit, result)
+
+
+def test_pytest_addopts_do_not_leak_into_workers(tmp_path: Path) -> None:
+    root = tmp_path / "suite"
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "sentinel.txt").write_text("keep")
+    junit = root / "shared-junit.xml"
+    _worker_isolation_suite(root, junit)
+    result = _run(
+        [str(root), "-j", "2", "-q"],
+        root,
+        {"PYTEST_ADDOPTS": _quoted_addopts("-p cacheprovider", junit, base)},
+    )
+    _assert_isolated_workers(root, base, junit, result)
+
+
+def test_ini_pyproject_and_pytest_addopts_are_sanitized_together(tmp_path: Path) -> None:
+    root = tmp_path / "suite"
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "sentinel.txt").write_text("keep")
+    junit = root / "shared-junit.xml"
+    _worker_isolation_suite(root, junit)
+    (root / "pytest.ini").write_text(f"[pytest]\naddopts = {_quoted_addopts('-pcacheprovider', junit, base)}\n")
+    pyproject_addopts = _quoted_addopts("-p cacheprovider", junit, base)
+    (root / "pyproject.toml").write_text(f"[tool.pytest.ini_options]\naddopts = {pyproject_addopts!r}\n")
+    result = _run(
+        [str(root), "-j", "2", "-q"],
+        root,
+        {"PYTEST_ADDOPTS": _quoted_addopts("-p cacheprovider", junit, base)},
+    )
+    _assert_isolated_workers(root, base, junit, result)
+
+
+def test_ini_log_file_is_per_worker(tmp_path: Path) -> None:
+    root = tmp_path / "suite"
+    root.mkdir()
+    (root / "pytest.ini").write_text("[pytest]\nlog_file = shared.log\nlog_file_level = INFO\n")
+    body = (
+        "import logging\n"
+        "import os\n"
+        "def test_logs():\n"
+        "    logging.getLogger('pytest_parallel_test').warning(\n"
+        "        'PYTEST_PARALLEL_WORKER_ID=%s', os.environ['PYTEST_PARALLEL_WORKER_ID']\n"
+        "    )\n"
+    )
+    (root / "test_a.py").write_text(body)
+    (root / "test_b.py").write_text(body)
+    result = _run([str(root), "-j", "2", "-q"], root)
+    assert result.returncode == 0, result.stdout
+    shared = (root / "shared.log").read_text(encoding="utf-8") if (root / "shared.log").exists() else ""
+    assert "PYTEST_PARALLEL_WORKER_ID=" not in shared
+    for worker_id in (0, 1):
+        text = (root / f"shared.worker-{worker_id}.log").read_text(encoding="utf-8")
+        assert f"PYTEST_PARALLEL_WORKER_ID={worker_id}" in text
