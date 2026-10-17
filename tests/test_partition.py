@@ -119,14 +119,14 @@ def test_multiprocessing_context_uses_spawn_on_macos():
     get_context.assert_called_once_with("spawn")
 
 
-def test_multiprocessing_context_uses_fork_on_linux():
+def test_multiprocessing_context_uses_forkserver_on_linux():
     with (
         patch("pytest_parallel.coordinator.sys.platform", "linux"),
         patch("pytest_parallel.coordinator.multiprocessing.get_context") as get_context,
     ):
         _multiprocessing_context()
 
-    get_context.assert_called_once_with("fork")
+    get_context.assert_called_once_with("forkserver")
 
 
 def test_linux_fork_guard_rejects_active_background_threads():
@@ -141,7 +141,7 @@ def test_linux_fork_guard_rejects_active_background_threads():
         patch("pytest_parallel.coordinator.threading.enumerate", return_value=[main, thread]),
         pytest.raises(pytest.UsageError, match="plugin-thread"),
     ):
-        _assert_safe_to_start_workers()
+        _assert_safe_to_start_workers("fork")
 
 
 def test_spawn_platforms_skip_thread_guard():

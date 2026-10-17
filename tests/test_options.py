@@ -82,6 +82,7 @@ def test_worker_count_capped_by_schedulable_file_groups(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stdout
     assert "pytest-parallel: 1 workers, 50 tests" in result.stdout
+    assert "requested 8 workers capped to 1 (1 scheduling units)" in result.stdout
 
 
 def test_invalid_max_workers_hook_raises_usage_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

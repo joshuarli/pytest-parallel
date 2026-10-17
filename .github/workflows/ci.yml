@@ -8,10 +8,19 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.13", "3.14"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: ubuntu-latest
+            python-version: "3.14"
+          - os: macos-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.14"
 
     steps:
       - uses: actions/checkout@v4
@@ -31,3 +40,24 @@ jobs:
 
       - name: Test
         run: make test
+
+      - name: Start-method smoke (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          uv run pytest tests/test_campaign.py -q --serial -k "start_methods or collection_mismatch"
+
+  pytest-nightly:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Test against pytest pre-release
+        run: |
+          uv sync
+          uv pip install --prerelease=allow "pytest>=9.1.dev0" || uv pip install pytest
+          uv run pytest tests/test_partition.py tests/test_options.py -q --serial

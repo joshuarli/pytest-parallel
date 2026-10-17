@@ -21,6 +21,9 @@ from typing import Any, Literal, Protocol, cast
 import pytest
 
 from .plugin import _DEFAULT_MAX_WORKERS, BalanceStrategy, StartMethod
+from .scheduling import FileUnit, Unit, assign_units, format_plan_text, merge_units, plan_dict
+from .scheduling import validate_group_names as _validate_hook_groups
+from .scheduling import validate_weight as _validate_hook_weight
 
 ReportOutcome = Literal["passed", "failed", "skipped"]
 ReportPhase = Literal["setup", "call", "teardown"]
@@ -58,7 +61,10 @@ _STRIP_VALUE_OPTIONS: frozenset[str] = frozenset(
         "--jobs",
         "--ramp",
         "--parallel-balance",
+        "--parallel-plan",
         "--parallel-start-method",
+        "--basetemp",
+        "--log-file",
         "--rootdir",
         "--junitxml",
         "--junit-xml",
@@ -69,11 +75,16 @@ _STRIP_PREFIX_OPTIONS: tuple[str, ...] = (
     "--jobs=",
     "--ramp=",
     "--parallel-balance=",
+    "--parallel-plan=",
     "--parallel-start-method=",
+    "--basetemp=",
+    "--log-file=",
     "--rootdir=",
     "--junitxml=",
     "--junit-xml=",
 )
+
+_STRIP_FLAG_OPTIONS: frozenset[str] = frozenset({"--lf", "--ff", "--nf", "--cache-clear", "--sw", "--stepwise"})
 
 _KEEP_VALUE_OPTIONS: frozenset[str] = frozenset(
     {
@@ -84,7 +95,6 @@ _KEEP_VALUE_OPTIONS: frozenset[str] = frozenset(
         "-p",
         "-r",
         "-W",
-        "--basetemp",
         "--capture",
         "--code-highlight",
         "--color",
@@ -96,7 +106,6 @@ _KEEP_VALUE_OPTIONS: frozenset[str] = frozenset(
         "--log-cli-format",
         "--log-cli-level",
         "--log-date-format",
-        "--log-file",
         "--log-file-date-format",
         "--log-file-format",
         "--log-file-level",
@@ -105,7 +114,6 @@ _KEEP_VALUE_OPTIONS: frozenset[str] = frozenset(
         "--maxfail",
         "--override-ini",
         "--pythonwarnings",
-        "--rootdir",
         "--show-capture",
         "--tb",
     }
@@ -158,6 +166,9 @@ class WorkerState:
         return [nodeid for nodeid in self.assigned if nodeid not in self.completed_set]
 
 
+_STOP_DRAIN_TIMEOUT = 5.0
+
+
 class Coordinator:
     def __init__(
         self,
@@ -165,7 +176,7 @@ class Coordinator:
         requested_workers: int,
         *,
         ramp: float = 0.0,
-        balance: BalanceStrategy = "round-robin",
+        balance: BalanceStrategy = "count",
         start_method: StartMethod = "auto",
     ) -> None:
         self.config = config
@@ -174,6 +185,7 @@ class Coordinator:
         self.balance: BalanceStrategy = balance
         self.start_method: StartMethod = start_method
         self._work_dir: Path | None = None
+        self._effective_max_workers: int | None = None
         self._completed = 0
         self._failed = 0
         self._failed_nodeids: list[str] = []
@@ -181,22 +193,146 @@ class Coordinator:
 
     def _ensure_work_dir(self) -> Path:
         if self._work_dir is None:
-            self._work_dir = Path(tempfile.mkdtemp(prefix="pytest_parallel_"))
+            explicit_basetemp = self._explicit_option("basetemp")
+            if explicit_basetemp:
+                base = Path(explicit_basetemp)
+                if not base.is_absolute():
+                    rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+                    base = rootpath / base
+                base.mkdir(parents=True, exist_ok=True)
+                self._work_dir = Path(tempfile.mkdtemp(prefix="pytest_parallel_", dir=base))
+            else:
+                self._work_dir = Path(tempfile.mkdtemp(prefix="pytest_parallel_"))
         return self._work_dir
+
+    def show_plan(self, session: pytest.Session, mode: str) -> bool:
+        if not session.items:
+            plan = {"balance": self.balance, "num_workers": 0, "num_units": 0, "total_weight": 0.0, "imbalance": 0.0, "workers": []}
+        else:
+            _, plan, _ = self._build_plan(session.items)
+        terminal = session.config.get_terminal_writer()
+        if mode == "json":
+            terminal.line(json.dumps(plan, indent=2, sort_keys=True))
+        else:
+            terminal.line(format_plan_text(plan))
+        return True
+
+    def build_plan(self, items: Sequence[Any]) -> dict[str, Any]:
+        _, plan, _ = self._build_plan(items)
+        return plan
+
+    def _build_plan(self, items: Sequence[Any]) -> tuple[list[list[Any]], dict[str, Any], list[list[Unit]]]:
+        units = self._build_units(items)
+        max_workers = self._resolve_max_workers()
+        self._effective_max_workers = max_workers
+        num_workers = max(1, min(self.requested_workers, len(units), max_workers))
+        pins = self._resolve_pins(units, num_workers)
+        buckets = assign_units(units, num_workers, balance=self.balance, pins=pins)
+        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+        plan = plan_dict(buckets, units, balance=self.balance, pins=pins, rootpath=rootpath)
+        groups = [[item for unit in bucket for item in unit.items] for bucket in buckets]
+        return groups, plan, buckets
+
+    def _build_units(self, items: Sequence[Any]) -> list[Unit]:
+        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+        files: list[FileUnit] = []
+        by_key: dict[str, FileUnit] = {}
+        for item in items:
+            path, key = _item_file(item, rootpath)
+            file_unit = by_key.get(key)
+            if file_unit is None:
+                file_unit = FileUnit(path=path, key=key, ordinal=len(files))
+                by_key[key] = file_unit
+                files.append(file_unit)
+            file_unit.items.append(item)
+            file_unit.groups.update(_extract_parallel_groups(item))
+        hook = getattr(self.config, "hook", None)
+        for file_unit in files:
+            if hook is not None and hasattr(hook, "pytest_parallel_file_groups"):
+                try:
+                    results = hook.pytest_parallel_file_groups(path=file_unit.path, items=list(file_unit.items))
+                except AttributeError:
+                    results = []
+                if isinstance(results, list):
+                    for result in results:
+                        file_unit.groups.update(_validate_hook_groups(result, file_unit.path, "pytest_parallel_file_groups"))
+            weight: float = float(len(file_unit.items))
+            if hook is not None and hasattr(hook, "pytest_parallel_file_weight"):
+                try:
+                    hook_weight = hook.pytest_parallel_file_weight(path=file_unit.path, items=list(file_unit.items))
+                except AttributeError:
+                    hook_weight = None
+                if hook_weight is not None:
+                    weight = _validate_hook_weight(hook_weight, file_unit.path)
+                    if not file_unit.items and weight != weight:
+                        raise pytest.UsageError(f"pytest_parallel_file_weight for {file_unit.path} is invalid")
+            file_unit.weight = weight
+        return merge_units(files)
+
+    def _resolve_pins(self, units: Sequence[Unit], num_workers: int) -> dict[int, int]:
+        hook = getattr(self.config, "hook", None)
+        pins: dict[int, int] = {}
+        if hook is None or not hasattr(hook, "pytest_parallel_shard_worker"):
+            return pins
+        for idx, unit in enumerate(units):
+            shard = unit.shard()
+            try:
+                results = hook.pytest_parallel_shard_worker(shard=shard, num_workers=num_workers)
+            except AttributeError:
+                continue
+            if not isinstance(results, list):
+                results = [results]
+            requested: set[int] = set()
+            for result in results:
+                if result is None:
+                    continue
+                if isinstance(result, bool) or not isinstance(result, int):
+                    raise pytest.UsageError(
+                        f"pytest_parallel_shard_worker for shard {list(shard.files)} must return an int worker index or None, got {result!r}"
+                    )
+                if result < 0 or result >= num_workers:
+                    raise pytest.UsageError(
+                        f"pytest_parallel_shard_worker for shard {list(shard.files)} returned worker {result}, outside [0, {num_workers})"
+                    )
+                requested.add(result)
+            if len(requested) > 1:
+                raise pytest.UsageError(
+                    f"conflicting pytest_parallel_shard_worker pins for shard {list(shard.files)}: {sorted(requested)}"
+                )
+            if requested:
+                pins[idx] = next(iter(requested))
+        return pins
 
     def run(self, session: pytest.Session) -> bool:
         workers: list[tuple[int, Any, Path, Path]] = []
         self._ensure_work_dir()
+        previous_sigterm: Any = None
+        sigterm_installed = False
         try:
+            if threading.current_thread() is threading.main_thread() and hasattr(signal, "SIGTERM"):
+                try:
+                    previous_sigterm = signal.signal(signal.SIGTERM, _sigterm_to_keyboard_interrupt)
+                    sigterm_installed = True
+                except (ValueError, OSError):
+                    sigterm_installed = False
             if not session.items:
                 return True
 
             self._validate_plugins()
-            max_workers = self._resolve_max_workers()
-            units = self._schedulable_units(session.items)
-            num_workers = max(1, min(self.requested_workers, len(units), max_workers))
-            groups = self._partition_units(units, num_workers, balance=self.balance)
+            groups, plan, buckets = self._build_plan(session.items)
+            num_workers = plan["num_workers"]
             self._total = len(session.items)
+            if self.requested_workers > num_workers:
+                limits: list[str] = []
+                if plan["num_units"] <= num_workers:
+                    limits.append(f"{plan['num_units']} scheduling units")
+                if num_workers == self._effective_max_workers:
+                    limits.append("max_workers limit")
+                if limits:
+                    session.config.get_terminal_writer().line(
+                        f"pytest-parallel: requested {self.requested_workers} workers capped to {num_workers} "
+                        f"({', '.join(limits)})"
+                    )
 
             terminal = session.config.get_terminal_writer()
             terminal.sep("=", f"pytest-parallel: {num_workers} workers, {self._total} tests")
@@ -210,14 +346,22 @@ class Coordinator:
             if session.shouldstop:
                 raise session.Interrupted(session.shouldstop)
 
-            active = [(index, [item.nodeid for item in group]) for index, group in enumerate(groups) if group]
+            loads = [float(sum(unit.weight for unit in bucket)) for bucket in buckets]
+            spawn_order = sorted(range(len(buckets)), key=lambda w: (-loads[w], w))
+            rank = {worker_id: pos for pos, worker_id in enumerate(spawn_order)}
+            active = [
+                (index, [item.nodeid for item in group], rank[index])
+                for index, group in enumerate(groups)
+                if group
+            ]
+            active.sort(key=lambda entry: entry[2])
             _assert_safe_to_start_workers(self.start_method)
             workers = self._spawn(active)
             self._monitor(
                 workers,
                 {item.nodeid: item for item in session.items},
                 session,
-                assigned_by_worker=dict(active),
+                assigned_by_worker={index: nodeids for index, nodeids, _ in active},
             )
 
             if session.shouldfail:
@@ -227,6 +371,11 @@ class Coordinator:
             return True
         finally:
             self._terminate_live_workers(workers)
+            if sigterm_installed:
+                try:
+                    signal.signal(signal.SIGTERM, previous_sigterm)
+                except (ValueError, OSError):
+                    pass
             if self._work_dir is not None:
                 shutil.rmtree(self._work_dir, ignore_errors=True)
 
@@ -356,7 +505,16 @@ class Coordinator:
             buckets[index % num_workers].extend(unit)
         return buckets
 
-    def _forwarded_args(self) -> list[str]:
+    def _explicit_option(self, name: str) -> str | None:
+        option = getattr(self.config, "option", None)
+        value = getattr(option, name, None) if option is not None else None
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    def _forwarded_args(self, worker_id: int | None = None) -> list[str]:
         invocation_params = getattr(self.config, "invocation_params", None)
         raw_args = getattr(invocation_params, "args", None)
         if not isinstance(raw_args, tuple | list):
@@ -364,6 +522,17 @@ class Coordinator:
 
         known = getattr(self.config, "known_args_namespace", None)
         positionals = list(getattr(known, "file_or_dir", []) or [])
+        parser_value_options: set[str] = set()
+        parser = getattr(self.config, "_parser", None)
+        optparser = getattr(parser, "optparser", None)
+        raw_actions = getattr(optparser, "_actions", [])
+        if not isinstance(raw_actions, list | tuple):
+            raw_actions = []
+        for action in raw_actions:
+            if getattr(action, "nargs", None) == 0:
+                continue
+            for opt in getattr(action, "option_strings", []) or []:
+                parser_value_options.add(str(opt))
 
         args: list[str] = []
         skip_next = False
@@ -393,11 +562,13 @@ class Coordinator:
                 continue
             if arg == "--serial":
                 continue
+            if arg in _STRIP_FLAG_OPTIONS:
+                continue
             if arg.startswith("-j") and arg != "-j":
                 continue
             if arg.startswith(_STRIP_PREFIX_OPTIONS):
                 continue
-            if arg in _KEEP_VALUE_OPTIONS:
+            if arg in _KEEP_VALUE_OPTIONS or arg in parser_value_options:
                 args.append(arg)
                 keep_next = True
                 continue
@@ -414,18 +585,46 @@ class Coordinator:
                 elif isinstance(plugin, types.ModuleType) and getattr(plugin, "__name__", None):
                     args.extend(["-p", plugin.__name__])
 
+        if worker_id is not None:
+            args.extend(["-p", "no:cacheprovider"])
+            explicit_basetemp = self._explicit_option("basetemp")
+            if explicit_basetemp:
+                base = Path(explicit_basetemp)
+                if not base.is_absolute():
+                    rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+                    base = rootpath / base
+                args.append(f"--basetemp={base / f'worker-{worker_id}'}")
+            else:
+                args.append(f"--basetemp={self._ensure_work_dir() / 'basetemp' / f'worker-{worker_id}'}")
+            explicit_log = self._explicit_option("log_file")
+            if explicit_log:
+                log_path = Path(explicit_log)
+                per_worker = log_path.with_name(f"{log_path.stem}.worker-{worker_id}{log_path.suffix}")
+                args.append(f"--log-file={per_worker}")
+
         return args
 
-    def _spawn(self, active: list[tuple[int, list[str]]]) -> list[tuple[int, Any, Path, Path]]:
+    def _spawn(self, active: list[Any]) -> list[tuple[int, Any, Path, Path]]:
         from .worker import run_worker
 
         work_dir = self._ensure_work_dir()
+        explicit_basetemp = self._explicit_option("basetemp")
+        if explicit_basetemp:
+            base = Path(explicit_basetemp)
+            if not base.is_absolute():
+                rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+                base = rootpath / base
+            base.mkdir(parents=True, exist_ok=True)
+        else:
+            (work_dir / "basetemp").mkdir(parents=True, exist_ok=True)
         context = cast(Any, _multiprocessing_context(self.start_method))
-        forwarded_args = self._forwarded_args()
         workers: list[tuple[int, Any, Path, Path]] = []
         total_active = len(active)
         try:
-            for pos, (index, nodeids) in enumerate(active):
+            for pos, entry in enumerate(active):
+                index, nodeids = entry[0], entry[1]
+                ramp_rank = entry[2] if len(entry) > 2 else pos
+                forwarded_args = self._forwarded_args(worker_id=index)
                 result_path = work_dir / f"worker_{index}_results.jsonl"
                 output_path = work_dir / f"worker_{index}_output.txt"
                 result_path.touch()
@@ -434,7 +633,7 @@ class Coordinator:
                 env["PYTEST_PARALLEL_WORKER_ID"] = str(index)
                 env["_PYTEST_PARALLEL_WORKER"] = "1"
                 if self.ramp > 0.0 and total_active > 1:
-                    delay = self.ramp * pos / (total_active - 1)
+                    delay = self.ramp * ramp_rank / (total_active - 1)
                     env["_PYTEST_PARALLEL_RAMP_DELAY"] = f"{delay:.6f}"
                 try:
                     term_size = shutil.get_terminal_size()
@@ -490,6 +689,7 @@ class Coordinator:
         try:
             alive = set(worker_states.keys())
             global_stop_requested = False
+            drain_deadline: float | None = None
 
             while alive:
                 for index in list(alive):
@@ -497,11 +697,12 @@ class Coordinator:
                     self._read_worker_events(state, items_by_nodeid, session, terminal, final=False)
                     if (session.shouldfail or session.shouldstop) and not global_stop_requested:
                         global_stop_requested = True
+                        drain_deadline = time.monotonic() + _STOP_DRAIN_TIMEOUT
                         self._trigger_global_stop(stop_path, worker_states)
                     if not state.process.is_alive():
                         alive.discard(index)
                 if alive:
-                    if global_stop_requested:
+                    if global_stop_requested and drain_deadline is not None and time.monotonic() >= drain_deadline:
                         self._terminate_live_workers(workers)
                         alive.clear()
                     else:
@@ -515,6 +716,13 @@ class Coordinator:
                 self._reconcile_worker(state, items_by_nodeid, session, terminal, terminal_reporter)
         except KeyboardInterrupt:
             self._trigger_global_stop(stop_path, worker_states)
+            deadline = time.monotonic() + 1.0
+            for state in worker_states.values():
+                remaining = max(0.0, deadline - time.monotonic())
+                try:
+                    state.process.join(timeout=remaining)
+                except Exception:
+                    pass
             self._terminate_live_workers(workers)
             raise
         finally:
@@ -844,12 +1052,14 @@ class Coordinator:
             state.protocol_errors.append(
                 f"incomplete phase reports for {nodeid!r} at test_finish on worker {state.worker_id}"
             )
+            state.current_test = None
             return
         setuponly = bool(getattr(self.config.option, "setuponly", False))
         if setup_rep.passed and not setuponly and "call" not in active.reports:
             state.protocol_errors.append(
                 f"missing call report for passed setup on {nodeid!r} on worker {state.worker_id}"
             )
+            state.current_test = None
             return
 
         state.current_test = None
@@ -898,8 +1108,13 @@ class Coordinator:
             return
 
         category = _resolve_warning_category(category_module, category_name)
+        try:
+            message_obj: Warning = category(message_text)
+        except Exception:
+            category = UserWarning
+            message_obj = UserWarning(message_text)
         warning_msg = warnings.WarningMessage(
-            message=category(message_text),
+            message=message_obj,
             category=category,
             filename=filename,
             lineno=lineno,
@@ -1218,12 +1433,28 @@ def _extract_parallel_groups(item: ShardItem) -> list[str]:
     return groups
 
 
+def _sigterm_to_keyboard_interrupt(signum: int, frame: Any) -> None:
+    raise KeyboardInterrupt
+
+
+def _item_file(item: Any, rootpath: Path) -> tuple[Path, str]:
+    raw_path = getattr(item, "path", None)
+    if isinstance(raw_path, Path):
+        try:
+            display = raw_path.relative_to(rootpath)
+        except Exception:
+            display = raw_path
+        return display, str(raw_path)
+    file_name = str(getattr(item, "nodeid", "")).partition("::")[0]
+    return Path(file_name), file_name
+
+
 def _resolve_start_method_name(start_method: StartMethod | None = None) -> str:
     if start_method is None or start_method == "auto":
         if sys.platform == "darwin":
             return "spawn"
         if sys.platform.startswith("linux"):
-            return "fork"
+            return "forkserver"
         return "spawn"
     if start_method not in {"fork", "spawn", "forkserver"}:
         raise pytest.UsageError(

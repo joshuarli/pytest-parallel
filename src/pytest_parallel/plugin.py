@@ -29,6 +29,18 @@ class ParallelHookSpec:
     def pytest_parallel_worker_env(self, env: dict[str, str], worker_id: int) -> None:
         """Mutate a worker subprocess environment."""
 
+    @pytest.hookspec
+    def pytest_parallel_file_groups(self, path: object, items: list) -> list[str] | None:
+        """Return additional affinity group names for one test file, or None."""
+
+    @pytest.hookspec(firstresult=True)
+    def pytest_parallel_file_weight(self, path: object, items: list) -> float | None:
+        """Return the estimated relative cost of one test file, or None for its test count."""
+
+    @pytest.hookspec
+    def pytest_parallel_shard_worker(self, shard: object, num_workers: int) -> int | None:
+        """Return a worker index pinning this shard, or None for automatic balancing."""
+
 
 def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:
     pluginmanager.add_hookspecs(ParallelHookSpec)
@@ -66,9 +78,17 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
     group._addoption(
         "--parallel-balance",
-        default="round-robin",
+        default="count",
         dest="parallel_balance",
-        help="File sharding strategy: 'round-robin' (default) or 'count'.",
+        help="File sharding strategy: 'count' (default, LPT by estimated weight) or 'round-robin'.",
+    )
+    group._addoption(
+        "--parallel-plan",
+        default=None,
+        nargs="?",
+        const="text",
+        dest="parallel_plan",
+        help="Print the static sharding plan ('text' or 'json') and exit without running tests.",
     )
     group._addoption(
         "--parallel-start-method",
@@ -80,16 +100,32 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtestloop(session: pytest.Session) -> bool | None:
-    if session.config.getoption("parallel_serial", default=False) or os.environ.get("_PYTEST_PARALLEL_WORKER"):
+    plan_mode = _parse_plan(session.config.getoption("parallel_plan", default=None))
+    if os.environ.get("_PYTEST_PARALLEL_WORKER"):
+        return None
+    if getattr(session.config.option, "setupplan", False):
+        return None
+    if session.config.getoption("parallel_serial", default=False):
+        if plan_mode is not None:
+            raise pytest.UsageError("--parallel-plan cannot be combined with --serial")
         return None
 
     requested = _parse_jobs(session.config.getoption("parallel_jobs", default="0"))
     ramp = _parse_ramp(session.config.getoption("parallel_ramp", default=None))
-    balance = _parse_balance(session.config.getoption("parallel_balance", default="round-robin"))
+    balance = _parse_balance(session.config.getoption("parallel_balance", default="count"))
     start_method = _parse_start_method(session.config.getoption("parallel_start_method", default="auto"))
 
     if requested <= 0:
+        if plan_mode is not None:
+            raise pytest.UsageError("--parallel-plan requires parallel execution (remove --serial / -j 0)")
         return None
+
+    numprocesses = getattr(session.config.option, "numprocesses", None)
+    if numprocesses not in (None, 0, "0"):
+        raise pytest.UsageError(
+            "pytest-parallel and pytest-xdist (-n/--numprocesses) cannot distribute the same run; "
+            "use one of them, or pass --serial to let xdist own distribution."
+        )
 
     if getattr(session.config.option, "usepdb", False) or getattr(session.config.option, "trace", False):
         raise pytest.UsageError(
@@ -102,6 +138,9 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
             f"{session.testsfailed} error{'s' if session.testsfailed != 1 else ''} during collection"
         )
 
+    if plan_mode is not None and getattr(session.config.option, "collectonly", False):
+        raise pytest.UsageError("--parallel-plan cannot be combined with --collect-only")
+
     if getattr(session.config.option, "collectonly", False):
         return True
 
@@ -112,13 +151,16 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
 
     from .coordinator import Coordinator
 
-    return Coordinator(
+    coordinator = Coordinator(
         session.config,
         requested,
         ramp=ramp,
         balance=balance,
         start_method=start_method,
-    ).run(session)
+    )
+    if plan_mode is not None:
+        return coordinator.show_plan(session, plan_mode)
+    return coordinator.run(session)
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
@@ -126,11 +168,25 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None):
     if item.get_closest_marker("enable_network") is not None:
         yield
         return
+    if os.environ.get("_PYTEST_PARALLEL_WORKER") != "1":
+        yield
+        return
 
     from .network import network_blocked
 
     with network_blocked():
         yield
+
+
+def _parse_plan(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"text", "human", ""}:
+        return "text"
+    if text == "json":
+        return "json"
+    raise pytest.UsageError(f"Invalid --parallel-plan value {value!r}; expected 'text' or 'json'.")
 
 
 def _parse_jobs(value: object) -> int:

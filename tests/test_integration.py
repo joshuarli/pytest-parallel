@@ -34,8 +34,8 @@ def test_jobs_option_runs_parallel_worker(tmp_path: Path) -> None:
     assert "1 passed" in result.stdout
 
 
-@pytest.mark.parametrize("runner_args", [("--serial",), ("-j", "1")], ids=["serial", "parallel"])
-def test_network_policy_and_loopback_exception(tmp_path: Path, runner_args: tuple[str, ...]) -> None:
+def test_network_policy_and_loopback_exception(tmp_path: Path) -> None:
+    runner_args = ("-j", "1")
     test_file = tmp_path / "test_network_policy.py"
     test_file.write_text(
         """
@@ -86,6 +86,49 @@ def test_marker_allows_network():
 
     assert result.returncode == 0, result.stdout
     assert "4 passed" in result.stdout
+
+
+def test_network_blocked_allows_local_bind_and_hostname() -> None:
+    import socket
+
+    from pytest_parallel.network import network_blocked
+
+    with network_blocked():
+        assert socket.getaddrinfo(None, 0, flags=socket.AI_PASSIVE)
+        for host in ("", socket.gethostname()):
+            try:
+                socket.getaddrinfo(host, 0)
+            except PermissionError:
+                raise AssertionError(f"lookup of {host!r} must not be blocked") from None
+            except OSError:
+                pass
+        with socket.socket() as listener:
+            listener.bind(("0.0.0.0", 0))
+            listener.listen()
+
+
+def test_serial_network_is_not_guarded(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_serial_net.py"
+    test_file.write_text(
+        "import socket\n"
+        "ORIGINAL = socket.socket.connect\n"
+        "def test_serial_keeps_socket_api():\n"
+        "    assert socket.socket.connect is ORIGINAL\n"
+        "    with socket.socket() as listener:\n"
+        "        listener.bind(('127.0.0.1', 0))\n"
+        "        listener.listen()\n"
+        "        assert socket.getaddrinfo(None, 0, flags=socket.AI_PASSIVE)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", str(test_file), "-q", "--serial"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=_clean_env(),
+    )
+    assert result.returncode == 0, result.stdout
+    assert "1 passed" in result.stdout
 
 
 def test_ramp_delays_first_test_after_collection(tmp_path: Path) -> None:

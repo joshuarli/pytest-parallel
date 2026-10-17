@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -53,11 +54,70 @@ def network_blocked() -> Iterator[None]:
             setattr(owner, name, original)
 
 
+_PEER_LOOPBACK: weakref.WeakKeyDictionary[socket.socket, bool] = weakref.WeakKeyDictionary()
+_HOT_METHODS = frozenset(
+    {
+        "recv",
+        "recv_into",
+        "recvfrom",
+        "recvfrom_into",
+        "recvmsg",
+        "recvmsg_into",
+        "send",
+        "sendall",
+        "sendfile",
+        "sendmsg",
+        "sendto",
+    }
+)
+
+
+def _explicit_send_address(name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    if name == "sendto":
+        if "address" in kwargs:
+            return kwargs["address"]
+        if len(args) >= 2:
+            return args[-1]
+        return None
+    if name == "sendmsg":
+        if "address" in kwargs:
+            return kwargs["address"]
+        if len(args) >= 4:
+            return args[3]
+        return None
+    return None
+
+
 def _guard_network_operation(name: str, original: Callable[..., Any]) -> Callable[..., Any]:
     def guarded(sock: socket.socket, *args: Any, **kwargs: Any) -> Any:
+        if sock.family == getattr(socket, "AF_UNIX", None):
+            return original(sock, *args, **kwargs)
+        if name in _HOT_METHODS and _explicit_send_address(name, args, kwargs) is None:
+            cached = _PEER_LOOPBACK.get(sock)
+            if cached is not None:
+                if not cached:
+                    raise PermissionError(_BLOCKED_MESSAGE)
+                return original(sock, *args, **kwargs)
         if not _targets_loopback(sock, name, args, kwargs):
             raise PermissionError(_BLOCKED_MESSAGE)
-        return original(sock, *args, **kwargs)
+        result = original(sock, *args, **kwargs)
+        if name in {"connect", "connect_ex"}:
+            try:
+                peer = sock.getpeername()
+                host = peer[0] if isinstance(peer, tuple) and peer else peer
+                _PEER_LOOPBACK[sock] = _is_loopback_host(host) or _is_local_hostname(host)
+            except OSError:
+                pass
+        elif name == "accept" and isinstance(result, tuple) and result:
+            accepted = result[0]
+            if isinstance(accepted, socket.socket):
+                try:
+                    peer = accepted.getpeername()
+                    host = peer[0] if isinstance(peer, tuple) and peer else peer
+                    _PEER_LOOPBACK[accepted] = _is_loopback_host(host) or _is_local_hostname(host)
+                except OSError:
+                    pass
+        return result
 
     return guarded
 
@@ -104,7 +164,9 @@ def _targets_loopback(
     else:
         return False
 
-    return _is_loopback_host(host)
+    if name in {"bind", "listen", "accept"} and _is_unspecified_host(host):
+        return True
+    return _is_loopback_host(host) or _is_local_hostname(host)
 
 
 def _guard_resolver(name: str, original: Callable[..., Any]) -> Callable[..., Any]:
@@ -114,11 +176,43 @@ def _guard_resolver(name: str, original: Callable[..., Any]) -> Callable[..., An
             address = args[0] if args else kwargs.get("sockaddr")
             if isinstance(address, tuple) and address:
                 address = address[0]
-        if not _is_loopback_host(address):
-            raise PermissionError(_BLOCKED_MESSAGE)
-        return original(*args, **kwargs)
+        if address is None or address == "" or address == b"":
+            return original(*args, **kwargs)
+        if _is_loopback_host(address) or _is_unspecified_host(address) or _is_local_hostname(address):
+            return original(*args, **kwargs)
+        raise PermissionError(_BLOCKED_MESSAGE)
 
     return guarded
+
+
+def _is_unspecified_host(host: Any) -> bool:
+    if isinstance(host, bytes):
+        try:
+            host = host.decode("ascii")
+        except UnicodeDecodeError:
+            return False
+    if not isinstance(host, str):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_unspecified
+    except ValueError:
+        return False
+
+
+def _is_local_hostname(host: Any) -> bool:
+    if isinstance(host, bytes):
+        try:
+            host = host.decode("ascii")
+        except UnicodeDecodeError:
+            return False
+    if not isinstance(host, str) or not host:
+        return False
+    try:
+        local = socket.gethostname()
+    except OSError:
+        return False
+    folded = host.casefold().rstrip(".")
+    return bool(local) and folded in {local.casefold(), local.casefold().split(".")[0]}
 
 
 def _is_loopback_host(host: Any) -> bool:

@@ -372,6 +372,34 @@ def _make_harness(tmp_path: Path, assigned: list[str]) -> tuple[Coordinator, Any
     return coordinator, state, session, items_by_nodeid
 
 
+def test_incomplete_finish_clears_active_test(tmp_path: Path) -> None:
+    coordinator, state, session, items = _make_harness(tmp_path, ["a.py::test_1"])
+    events = [
+        '{"v": 1, "type": "collection", "nodeids": ["a.py::test_1"]}',
+        '{"v": 1, "type": "test_start", "nodeid": "a.py::test_1"}',
+        '{"v": 1, "type": "test_finish", "nodeid": "a.py::test_1"}',
+    ]
+    state.result_path.write_text("\n".join(events) + "\n", encoding="utf-8")
+    coordinator._read_worker_events(state, items, session, Mock(), final=True)
+    assert state.current_test is None
+    assert any("incomplete phase reports" in err for err in state.protocol_errors)
+
+
+def test_missing_call_report_clears_active_test(tmp_path: Path) -> None:
+    coordinator, state, session, items = _make_harness(tmp_path, ["a.py::test_1"])
+    events = [
+        '{"v": 1, "type": "collection", "nodeids": ["a.py::test_1"]}',
+        '{"v": 1, "type": "test_start", "nodeid": "a.py::test_1"}',
+        '{"v": 1, "type": "report", "nodeid": "a.py::test_1", "when": "setup", "outcome": "passed", "duration": 0}',
+        '{"v": 1, "type": "report", "nodeid": "a.py::test_1", "when": "teardown", "outcome": "passed", "duration": 0}',
+        '{"v": 1, "type": "test_finish", "nodeid": "a.py::test_1"}',
+    ]
+    state.result_path.write_text("\n".join(events) + "\n", encoding="utf-8")
+    coordinator._read_worker_events(state, items, session, Mock(), final=True)
+    assert state.current_test is None
+    assert any("missing call report" in err for err in state.protocol_errors)
+
+
 def test_partial_jsonl_line_is_buffered_until_newline(tmp_path: Path) -> None:
     coordinator, state, session, items = _make_harness(tmp_path, ["a.py::test_1"])
     terminal = Mock()

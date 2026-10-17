@@ -31,6 +31,7 @@ class ResultReporter:
         self.output_path = output_path
         self.ramp_delay = ramp_delay
         self.config: pytest.Config | None = None
+        self.session: pytest.Session | None = None
         self._capture_mode = "fd"
         self._collection_finished = False
         self._ramp_applied = False
@@ -103,7 +104,11 @@ class ResultReporter:
             }
         )
 
+    def pytest_sessionstart(self, session: pytest.Session) -> None:
+        self.session = session
+
     def pytest_collection_finish(self, session: pytest.Session) -> None:
+        self.session = session
         self._collection_finished = True
         collected = [item.nodeid for item in session.items]
         self._emit({"type": "collection", "nodeids": collected})
@@ -174,10 +179,8 @@ class ResultReporter:
         if stdout:
             payload["stdout"] = stdout
         self._emit(payload)
-        if self._should_stop() and self.config is not None:
-            session = getattr(self.config, "_ parallel_session", None)
-            if session is not None:
-                session.shouldstop = "stopped by coordinator"
+        if self._should_stop() and self.session is not None:
+            self.session.shouldstop = "stopped by coordinator"
 
     def pytest_warning_recorded(
         self,
@@ -234,10 +237,6 @@ class ResultReporter:
 IteratorOrGenerator = Generator[None]
 
 
-def main() -> None:
-    sys.exit(pytest.main())
-
-
 def run_worker(
     env: dict[str, str],
     nodeids: list[str],
@@ -265,8 +264,31 @@ def run_worker(
         ramp_delay=ramp_delay,
     )
     with output_path.open("a", encoding="utf-8") as output_file, redirect_stdout(output_file), redirect_stderr(output_file):
-        exit_code = pytest.main(args, plugins=[reporter])
-        output_file.flush()
+        saved_fds: list[int] = []
+        try:
+            for fd in (1, 2):
+                try:
+                    saved_fds.append(os.dup(fd))
+                    os.dup2(output_file.fileno(), fd)
+                except OSError:
+                    pass
+            exit_code = pytest.main(args, plugins=[reporter])
+        finally:
+            try:
+                sys.stdout.flush()
+            except Exception:
+                pass
+            try:
+                sys.stderr.flush()
+            except Exception:
+                pass
+            output_file.flush()
+            for fd, saved in zip((1, 2), saved_fds, strict=False):
+                try:
+                    os.dup2(saved, fd)
+                    os.close(saved)
+                except OSError:
+                    pass
         sys.exit(int(exit_code))
 
 
@@ -283,7 +305,3 @@ def _absolute_nodeids(rootdir: str, nodeids: list[str]) -> list[str]:
             path = root / path
         absolute.append(f"{path}{sep}{rest}" if sep else str(path))
     return absolute
-
-
-if __name__ == "__main__":
-    main()
