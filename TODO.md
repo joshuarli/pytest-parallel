@@ -21,15 +21,6 @@ Next: 14
 - **Effort:** S (hours)
 - **Design:** [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
 
-### PAR-9 · P3 · Working directory in system /tmp ignores pytest --basetemp
-
-- **Area:** OS
-- **Where:** `src/pytest_parallel/coordinator.py:182-185`
-- **Problem:** `_ensure_work_dir()` creates `tempfile.mkdtemp(prefix="pytest_parallel_")` in the OS default temp directory (`/tmp` or `$TMPDIR`). It ignores Pytest's configured `--basetemp` option, which is explicitly used in CI and disk-constrained environments where `/tmp` is small, RAM-backed, or disallowed.
-- **Recommendation:** Check `self.config.option.basetemp` before creating temporary directories, creating the work directory inside `--basetemp` when specified.
-- **Fix with:** `os-boundaries`
-- **Effort:** S (hours)
-
 ### PAR-10 · P3 · Native and subprocess writes bypass output redirection when -s is used
 
 - **Area:** Operability
