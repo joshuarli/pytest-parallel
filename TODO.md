@@ -21,15 +21,6 @@ Next: 14
 - **Effort:** S (hours)
 - **Design:** [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
 
-### PAR-7 · P2 · Missing SIGTERM handler in coordinator orphans worker subprocesses and leaks temp directories
-
-- **Area:** Concurrency
-- **Where:** `src/pytest_parallel/coordinator.py:187-231`, `src/pytest_parallel/coordinator.py:516-519`
-- **Problem:** `Coordinator` catches `KeyboardInterrupt` (SIGINT) to terminate workers, but registers no handler for `SIGTERM`. When pytest runs in CI systems (GitHub Actions, Kubernetes pods) that enforce timeouts via `SIGTERM`, the coordinator process is killed immediately without unwinding Python frames or executing `finally:` blocks. Worker subprocesses continue executing as detached orphans and `/tmp/pytest_parallel_*` directories remain uncleaned.
-- **Recommendation:** Install a `SIGTERM` handler in `Coordinator.run()` that calls `_terminate_live_workers()` and cleans up `_work_dir` before exiting.
-- **Fix with:** `lifecycle-concurrency`
-- **Effort:** S (hours)
-
 ### PAR-8 · P3 · Silent worker count cap of explicit -j to 64 without warning
 
 - **Area:** Config
