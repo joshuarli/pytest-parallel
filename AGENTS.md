@@ -11,7 +11,7 @@ A pytest plugin that collects in the parent session and assigns whole test files
 
 ## Invariants
 
-- Fixed workers and static assignment only: no work stealing or dynamic dispatch. All scheduling happens in the controller after collection and before workers run tests.
+- Fixed workers and static assignment only: no work stealing or dynamic dispatch. All scheduling happens in the controller after collection and before workers run tests. `--parallel-plan=json` writes one JSON document (`version` 1) and a trailing newline to stdout; diagnostics go to stderr. Collection errors and `UsageError` stay non-zero and do not print a plan.
 - Assign scheduling units by count-balanced LPT by default (`--parallel-balance=count`): sort units by descending estimated weight with collection-position tie-breaking, assign each to the least-loaded worker with worker-index tie-breaking, then restore relative file collection order within each worker. `--parallel-balance=round-robin` keeps collection-order round-robin. Weights default to item count per file; `pytest_parallel_file_weight` may return a positive finite number (never bool, zero, negative, NaN, or infinite).
 - Preserve test order within each file. No global execution order exists across workers.
 - Never mutate `item.nodeid` to encode scheduling metadata (`@pytest.mark.parallel_group`, `pytest_parallel_file_groups`). Identify files from item path metadata when available, falling back to the nodeid file part. Merge files transitively through shared group names; deduplicate and validate group names.

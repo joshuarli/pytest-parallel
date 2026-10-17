@@ -6,7 +6,7 @@
 
 - Make count-balanced LPT (`--parallel-balance=count`) the default; `round-robin` remains an explicit opt-out. Scheduling is deterministic (weight, collection position, then worker index) and restores relative file order per worker.
 - Add the public customization hooks `pytest_parallel_file_groups`, `pytest_parallel_file_weight` (first non-`None` result), and `pytest_parallel_shard_worker` (conflicting pins are rejected), plus the frozen `pytest_parallel.api.Shard` type. Invalid weights, group names, and pins raise `pytest.UsageError` before workers spawn.
-- Add `--parallel-plan[=text|json]` to print the resolved plan without running tests or spawning workers.
+- Add `--parallel-plan[=text|json]` to print the resolved plan without running tests or spawning workers. JSON mode writes one versioned document to stdout and leaves diagnostics on stderr.
 - Start the heaviest worker first under `--ramp`; ramping still waits at most once per worker, after collection.
 
 ### Correctness and reliability

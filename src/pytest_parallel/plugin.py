@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import os
 import re
+import sys
+from collections.abc import Generator
 from typing import Literal
 
 import pytest
@@ -46,12 +48,42 @@ def pytest_addhooks(pluginmanager: pytest.PytestPluginManager) -> None:
     pluginmanager.add_hookspecs(ParallelHookSpec)
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "enable_network: allow network access during this test")
     config.addinivalue_line(
         "markers",
         "parallel_group(name, ...): assign related tests and their files to the same parallel worker",
     )
+    if _json_plan_requested(config):
+        _terminal_reporter_to_stderr(config)
+
+
+def _json_plan_requested(config: pytest.Config) -> bool:
+    value = config.getoption("parallel_plan", default=None)
+    if value is None:
+        return False
+    return str(value).strip().lower() == "json"
+
+
+def _terminal_reporter_to_stderr(config: pytest.Config) -> None:
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is None:
+        return
+    from _pytest.config import create_terminal_writer
+
+    reporter._tw = create_terminal_writer(config, sys.stderr)
+
+
+@pytest.hookimpl(hookwrapper=True, trylast=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> Generator[None]:
+    yield
+    from .coordinator import PLAN_PRINTED
+
+    if not session.config.stash.get(PLAN_PRINTED, False) or session.testsfailed:
+        return
+    if exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED:
+        session.exitstatus = pytest.ExitCode.OK
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

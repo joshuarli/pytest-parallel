@@ -26,6 +26,8 @@ from .scheduling import FileUnit, Unit, assign_units, format_plan_text, merge_un
 from .scheduling import validate_group_names as _validate_hook_groups
 from .scheduling import validate_weight as _validate_hook_weight
 
+PLAN_PRINTED = pytest.StashKey[bool]()
+
 ReportOutcome = Literal["passed", "failed", "skipped"]
 ReportPhase = Literal["setup", "call", "teardown"]
 
@@ -209,15 +211,17 @@ class Coordinator:
         return self._work_dir
 
     def show_plan(self, session: pytest.Session, mode: str) -> bool:
+        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
         if not session.items:
-            plan = {"balance": self.balance, "num_workers": 0, "num_units": 0, "total_weight": 0.0, "imbalance": 0.0, "workers": []}
+            plan = plan_dict([], [], balance=self.balance, pins={}, rootpath=rootpath)
         else:
             _, plan, _ = self._build_plan(session.items)
-        terminal = session.config.get_terminal_writer()
         if mode == "json":
-            terminal.line(json.dumps(plan, indent=2, sort_keys=True))
+            sys.stdout.write(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+            sys.stdout.flush()
         else:
-            terminal.line(format_plan_text(plan))
+            session.config.get_terminal_writer().line(format_plan_text(plan))
+        self.config.stash[PLAN_PRINTED] = True
         return True
 
     def build_plan(self, items: Sequence[Any]) -> dict[str, Any]:
