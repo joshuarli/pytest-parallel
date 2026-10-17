@@ -21,15 +21,6 @@ Next: 14
 - **Effort:** S (hours)
 - **Design:** [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
 
-### PAR-3 · P2 · System call and IP parsing overhead on hot send and recv paths
-
-- **Area:** Performance
-- **Where:** `src/pytest_parallel/network.py:86-107`, `src/pytest_parallel/network.py:124-142`
-- **Problem:** `_SOCKET_METHODS` wraps every `recv`, `recv_into`, `send`, `sendall`, `sendfile`, `sendmsg`, and `sendto`. On every single chunk/call, `_targets_loopback` calls `sock.getpeername()` (a syscall) followed by `_is_loopback_host()`, which parses `ipaddress.ip_address()` with object allocation. A connected TCP socket's peer address is immutable. In test suites doing high-volume local socket I/O (local APIs, databases, streaming fixtures), calling a syscall and IP parser per chunk adds severe latency and CPU overhead.
-- **Recommendation:** Cache verified loopback status on connected socket instances upon `connect()` / `accept()` and skip per-chunk `getpeername()` and IP address parsing.
-- **Fix with:** `make-it-fast`
-- **Effort:** S (hours)
-
 ### PAR-4 · P2 · --setup-plan flag swallows fixture execution plan and runs redundant workers
 
 - **Area:** Operability
