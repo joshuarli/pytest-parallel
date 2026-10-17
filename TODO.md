@@ -21,15 +21,6 @@ Next: 14
 - **Effort:** S (hours)
 - **Design:** [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
 
-### PAR-4 · P2 · --setup-plan flag swallows fixture execution plan and runs redundant workers
-
-- **Area:** Operability
-- **Where:** `src/pytest_parallel/plugin.py:105-107`, `src/pytest_parallel/coordinator.py:187-227`, `src/pytest_parallel/worker.py:267-270`
-- **Problem:** `--setup-plan` prints fixture execution plans without running tests. While `--collect-only` returns early in `plugin.py`, `--setup-plan` is not intercepted. It spawns parallel worker subprocesses that redirect their output to `output.txt` and run pytest with `--setup-plan`. Because no tests run or report, the output is swallowed and pytest-parallel exits with `no tests ran` and zero plan output displayed.
-- **Recommendation:** Intercept `--setup-plan` (`config.option.setupplan`) in `pytest_runtestloop` and return `None` (falling back to serial execution) or `True`.
-- **Fix with:** `isolate-effects`
-- **Effort:** S (hours)
-
 ### PAR-5 · P2 · Argument forwarding has conflicting option tables and drops custom plugin arguments
 
 - **Area:** Architecture
