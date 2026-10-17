@@ -21,15 +21,6 @@ Next: 14
 - **Effort:** S (hours)
 - **Design:** [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
 
-### PAR-11 · P3 · Cascading diagnostic errors when test finish report is incomplete
-
-- **Area:** Errors
-- **Where:** `src/pytest_parallel/coordinator.py:841-853`, `src/pytest_parallel/coordinator.py:960-964`
-- **Problem:** In `_handle_test_finish_event`, if `setup` or `teardown` reports are missing, it appends a protocol error and returns early without resetting `state.current_test` or advancing `state.completed`. During reconciliation, `_reconcile_worker` sees `state.current_test is not None` and generates a secondary premature termination diagnostic that obscures the root protocol error.
-- **Recommendation:** Clear `state.current_test` and synthesize an explicit failure report on the missing phase so failure diagnostics accurately pinpoint the defect.
-- **Fix with:** `error-model`
-- **Effort:** S (hours)
-
 ### PAR-12 · P3 · Build system requires pin upper bound triggers uv version warning
 
 - **Area:** Build
