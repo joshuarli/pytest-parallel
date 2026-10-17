@@ -153,3 +153,117 @@ def test_spawn_platforms_skip_thread_guard():
         patch("pytest_parallel.coordinator.threading.enumerate", return_value=[thread]),
     ):
         _assert_safe_to_start_workers()
+
+
+def test_explicit_spawn_on_linux_skips_thread_guard():
+    thread = Mock()
+    thread.is_alive.return_value = True
+
+    with (
+        patch("pytest_parallel.coordinator.sys.platform", "linux"),
+        patch("pytest_parallel.coordinator.threading.enumerate", return_value=[thread]),
+    ):
+        _assert_safe_to_start_workers("spawn")
+
+
+def test_unsupported_start_method_raises_usage_error():
+    with (
+        patch("pytest_parallel.coordinator.multiprocessing.get_context", side_effect=ValueError("no fork")),
+        pytest.raises(pytest.UsageError, match="not supported"),
+    ):
+        _multiprocessing_context("fork")
+
+
+def test_count_balance_assigns_largest_files_first_and_preserves_order():
+    items = [
+        _make_item("small_a.py::test_1"),
+        _make_item("small_b.py::test_1"),
+        _make_item("heavy.py::test_1"),
+        _make_item("heavy.py::test_2"),
+        _make_item("heavy.py::test_3"),
+        _make_item("heavy.py::test_4"),
+        _make_item("medium.py::test_1"),
+        _make_item("medium.py::test_2"),
+    ]
+
+    buckets = Coordinator._partition(items, 2, balance="count")
+
+    assert [item.nodeid for item in buckets[0]] == [
+        "heavy.py::test_1",
+        "heavy.py::test_2",
+        "heavy.py::test_3",
+        "heavy.py::test_4",
+    ]
+    assert [item.nodeid for item in buckets[1]] == [
+        "small_a.py::test_1",
+        "small_b.py::test_1",
+        "medium.py::test_1",
+        "medium.py::test_2",
+    ]
+
+
+def _make_marked_item(nodeid: str, groups: list[tuple[object, ...]], kwargs_list: list[dict[str, object]] | None = None) -> Mock:
+    item = _make_item(nodeid)
+    marks = []
+    for idx, args in enumerate(groups):
+        mark = Mock()
+        mark.args = args
+        mark.kwargs = kwargs_list[idx] if kwargs_list and idx < len(kwargs_list) else {}
+        marks.append(mark)
+    item.iter_markers = lambda name: iter(marks) if name == "parallel_group" else iter(())
+    return item
+
+
+def test_parallel_group_combines_connected_files_without_mutating_nodeid():
+    items = [
+        _make_marked_item("f1.py::test_a", [(" db ",)]),
+        _make_item("f2.py::test_b"),
+        _make_marked_item("f3.py::test_c", [("db", "cache")]),
+        _make_marked_item("f4.py::test_d", [("cache",)]),
+    ]
+
+    buckets = Coordinator._partition(items, 2)
+
+    assert [item.nodeid for item in buckets[0]] == [
+        "f1.py::test_a",
+        "f3.py::test_c",
+        "f4.py::test_d",
+    ]
+    assert [item.nodeid for item in buckets[1]] == ["f2.py::test_b"]
+
+
+def test_parallel_group_rejects_empty_or_non_string_names():
+    bad_empty = [_make_marked_item("f1.py::test_a", [("   ",)])]
+    with pytest.raises(pytest.UsageError, match="non-empty"):
+        Coordinator._partition(bad_empty, 1)
+
+    bad_no_args = [_make_marked_item("f1.py::test_a", [()])]
+    with pytest.raises(pytest.UsageError, match="at least one"):
+        Coordinator._partition(bad_no_args, 1)
+
+    bad_kwarg = [_make_marked_item("f1.py::test_a", [("db",)], [{"extra": 1}])]
+    with pytest.raises(pytest.UsageError, match="unexpected keyword"):
+        Coordinator._partition(bad_kwarg, 1)
+
+
+def test_forwarded_args_uses_invocation_params_and_strips_coordinator_flags():
+    config = Mock()
+    config.known_args_namespace.file_or_dir = ["tests/"]
+    config.invocation_params.args = (
+        "tests/",
+        "-k",
+        "tests/",
+        "--ramp=2s",
+        "--parallel-balance",
+        "count",
+        "--parallel-start-method=spawn",
+        "--junitxml=out.xml",
+        "--rootdir=/tmp",
+        "-j2",
+        "-v",
+    )
+    config.invocation_params.plugins = ("my_custom_plugin",)
+    coordinator = Coordinator(cast(Any, config), 2)
+
+    assert coordinator._forwarded_args() == ["-k", "tests/", "-v", "-p", "my_custom_plugin"]
+

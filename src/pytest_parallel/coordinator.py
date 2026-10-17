@@ -1,28 +1,115 @@
 from __future__ import annotations
 
+import builtins
 import json
+import math
 import multiprocessing
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import threading
 import time
+import types
+import warnings
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
 import pytest
 
-from .plugin import _DEFAULT_MAX_WORKERS
-
-_OUTCOME_CHARS = {
-    "failed": "F",
-    "passed": ".",
-    "skipped": "s",
-}
+from .plugin import _DEFAULT_MAX_WORKERS, BalanceStrategy, StartMethod
 
 ReportOutcome = Literal["passed", "failed", "skipped"]
+ReportPhase = Literal["setup", "call", "teardown"]
+
+_VALID_OUTCOMES: frozenset[str] = frozenset({"passed", "failed", "skipped"})
+_VALID_PHASES: frozenset[str] = frozenset({"setup", "call", "teardown"})
+_PHASE_ORDER: tuple[ReportPhase, ...] = ("setup", "call", "teardown")
+
+_WORKER_EXECUTION_HOOKS: frozenset[str] = frozenset(
+    {
+        "pytest_collect_directory",
+        "pytest_collect_file",
+        "pytest_collection",
+        "pytest_collection_modifyitems",
+        "pytest_fixture_post_finalizer",
+        "pytest_fixture_setup",
+        "pytest_generate_tests",
+        "pytest_ignore_collect",
+        "pytest_itemcollected",
+        "pytest_make_collect_report",
+        "pytest_pycollect_makeitem",
+        "pytest_pycollect_makemodule",
+        "pytest_pyfunc_call",
+        "pytest_runtest_call",
+        "pytest_runtest_makereport",
+        "pytest_runtest_protocol",
+        "pytest_runtest_setup",
+        "pytest_runtest_teardown",
+    }
+)
+
+_STRIP_VALUE_OPTIONS: frozenset[str] = frozenset(
+    {
+        "-j",
+        "--jobs",
+        "--ramp",
+        "--parallel-balance",
+        "--parallel-start-method",
+        "--rootdir",
+        "--junitxml",
+        "--junit-xml",
+    }
+)
+
+_STRIP_PREFIX_OPTIONS: tuple[str, ...] = (
+    "--jobs=",
+    "--ramp=",
+    "--parallel-balance=",
+    "--parallel-start-method=",
+    "--rootdir=",
+    "--junitxml=",
+    "--junit-xml=",
+)
+
+_KEEP_VALUE_OPTIONS: frozenset[str] = frozenset(
+    {
+        "-c",
+        "-k",
+        "-m",
+        "-o",
+        "-p",
+        "-r",
+        "-W",
+        "--basetemp",
+        "--capture",
+        "--code-highlight",
+        "--color",
+        "--confcutdir",
+        "--durations",
+        "--durations-min",
+        "--import-mode",
+        "--log-cli-date-format",
+        "--log-cli-format",
+        "--log-cli-level",
+        "--log-date-format",
+        "--log-file",
+        "--log-file-date-format",
+        "--log-file-format",
+        "--log-file-level",
+        "--log-format",
+        "--log-level",
+        "--maxfail",
+        "--override-ini",
+        "--pythonwarnings",
+        "--rootdir",
+        "--show-capture",
+        "--tb",
+    }
+)
 
 
 class ShardItem(Protocol):
@@ -30,107 +117,342 @@ class ShardItem(Protocol):
     location: tuple[str, int | None, str]
 
 
+@dataclass
+class ActiveTestState:
+    nodeid: str
+    location: tuple[str, int | None, str]
+    reports: dict[str, pytest.TestReport] = field(default_factory=dict)
+
+
+@dataclass
+class WorkerState:
+    worker_id: int
+    process: Any
+    result_path: Path
+    output_path: Path
+    assigned: list[str]
+    assigned_set: set[str] = field(init=False)
+    offset: int = 0
+    started: list[str] = field(default_factory=list)
+    started_set: set[str] = field(default_factory=set)
+    completed: list[str] = field(default_factory=list)
+    completed_set: set[str] = field(default_factory=set)
+    failed_nodeids: list[str] = field(default_factory=list)
+    current_test: ActiveTestState | None = None
+    last_nodeid: str | None = None
+    collection_verified: bool = False
+    collected_nodeids: list[str] | None = None
+    collect_failed: bool = False
+    session_finished: bool = False
+    session_exitstatus: int | None = None
+    session_shouldstop: str | None = None
+    session_shouldfail: str | None = None
+    protocol_errors: list[str] = field(default_factory=list)
+    stopped_by_coordinator: bool = False
+
+    def __post_init__(self) -> None:
+        self.assigned_set = set(self.assigned)
+
+    @property
+    def unreported(self) -> list[str]:
+        return [nodeid for nodeid in self.assigned if nodeid not in self.completed_set]
+
+
 class Coordinator:
-    def __init__(self, config: pytest.Config, requested_workers: int) -> None:
+    def __init__(
+        self,
+        config: pytest.Config,
+        requested_workers: int,
+        *,
+        ramp: float = 0.0,
+        balance: BalanceStrategy = "round-robin",
+        start_method: StartMethod = "auto",
+    ) -> None:
         self.config = config
         self.requested_workers = requested_workers
-        self._work_dir = Path(tempfile.mkdtemp(prefix="pytest_parallel_"))
+        self.ramp = ramp
+        self.balance: BalanceStrategy = balance
+        self.start_method: StartMethod = start_method
+        self._work_dir: Path | None = None
         self._completed = 0
         self._failed = 0
         self._failed_nodeids: list[str] = []
         self._total = 0
 
+    def _ensure_work_dir(self) -> Path:
+        if self._work_dir is None:
+            self._work_dir = Path(tempfile.mkdtemp(prefix="pytest_parallel_"))
+        return self._work_dir
+
     def run(self, session: pytest.Session) -> bool:
         workers: list[tuple[int, Any, Path, Path]] = []
+        self._ensure_work_dir()
         try:
             if not session.items:
                 return True
 
-            max_workers = self.config.hook.pytest_parallel_max_workers() or _DEFAULT_MAX_WORKERS
-            num_workers = max(1, min(self.requested_workers, len(session.items), max_workers))
-            groups = self._partition(session.items, num_workers)
+            self._validate_plugins()
+            max_workers = self._resolve_max_workers()
+            units = self._schedulable_units(session.items)
+            num_workers = max(1, min(self.requested_workers, len(units), max_workers))
+            groups = self._partition_units(units, num_workers, balance=self.balance)
             self._total = len(session.items)
 
             terminal = session.config.get_terminal_writer()
             terminal.sep("=", f"pytest-parallel: {num_workers} workers, {self._total} tests")
             for index, group in enumerate(groups):
-                file_count = len({item.nodeid.split("::")[0] for item in group})
+                file_count = len({item.nodeid.partition("::")[0] for item in group})
                 terminal.line(f"  worker {index}: {len(group)} tests ({file_count} files)")
 
             self.config.hook.pytest_parallel_pre_spawn(config=self.config, num_workers=num_workers)
+            if session.shouldfail:
+                raise session.Failed(session.shouldfail)
+            if session.shouldstop:
+                raise session.Interrupted(session.shouldstop)
 
             active = [(index, [item.nodeid for item in group]) for index, group in enumerate(groups) if group]
-            _assert_safe_to_start_workers()
+            _assert_safe_to_start_workers(self.start_method)
             workers = self._spawn(active)
-            self._monitor(workers, {item.nodeid: item for item in session.items}, session)
+            self._monitor(
+                workers,
+                {item.nodeid: item for item in session.items},
+                session,
+                assigned_by_worker=dict(active),
+            )
 
-            session.testsfailed = self._failed
+            if session.shouldfail:
+                raise session.Failed(session.shouldfail)
+            if session.shouldstop:
+                raise session.Interrupted(session.shouldstop)
             return True
         finally:
             self._terminate_live_workers(workers)
-            shutil.rmtree(self._work_dir, ignore_errors=True)
+            if self._work_dir is not None:
+                shutil.rmtree(self._work_dir, ignore_errors=True)
+
+    def _resolve_max_workers(self) -> int:
+        hook_value = self.config.hook.pytest_parallel_max_workers()
+        if hook_value is None:
+            return _DEFAULT_MAX_WORKERS
+        if isinstance(hook_value, bool) or not isinstance(hook_value, int) or hook_value < 1:
+            raise pytest.UsageError(
+                f"pytest_parallel_max_workers must return a positive integer or None, got {hook_value!r}"
+            )
+        return hook_value
+
+    def _validate_plugins(self) -> None:
+        invocation_params = getattr(self.config, "invocation_params", None)
+        plugins = getattr(invocation_params, "plugins", None)
+        if not isinstance(plugins, Sequence) or isinstance(plugins, str | bytes):
+            return
+        for plugin in plugins:
+            if isinstance(plugin, str | types.ModuleType):
+                continue
+            unsupported: list[str] = []
+            for attr_name in dir(plugin):
+                if attr_name in _WORKER_EXECUTION_HOOKS:
+                    unsupported.append(attr_name)
+                    continue
+                try:
+                    attr_val = getattr(plugin, attr_name)
+                except Exception:
+                    continue
+                if hasattr(attr_val, "_pytestfixturefunction"):
+                    unsupported.append(attr_name)
+            if unsupported:
+                hooks_desc = ", ".join(sorted(unsupported))
+                raise pytest.UsageError(
+                    f"In-memory plugin {plugin!r} implements worker execution or collection hooks "
+                    f"({hooks_desc}) that cannot be forwarded to parallel worker processes. "
+                    "Pass --serial or register the plugin by module name with -p."
+                )
 
     @staticmethod
-    def _partition(items: Sequence[ShardItem], num_workers: int) -> list[list[ShardItem]]:
+    def _schedulable_units(items: Sequence[ShardItem]) -> list[list[ShardItem]]:
         by_file: dict[str, list[ShardItem]] = {}
         file_order: list[str] = []
+        file_groups: list[set[str]] = []
+        file_index_by_name: dict[str, int] = {}
+
         for item in items:
-            file_name = item.nodeid.split("::")[0]
+            file_name = item.nodeid.partition("::")[0]
             if file_name not in by_file:
+                file_index_by_name[file_name] = len(file_order)
                 by_file[file_name] = []
                 file_order.append(file_name)
+                file_groups.append(set())
             by_file[file_name].append(item)
+            file_groups[file_index_by_name[file_name]].update(_extract_parallel_groups(item))
 
+        num_files = len(file_order)
+        parent = list(range(num_files))
+
+        def find(idx: int) -> int:
+            while parent[idx] != idx:
+                parent[idx] = parent[parent[idx]]
+                idx = parent[idx]
+            return idx
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                low, high = (ra, rb) if ra < rb else (rb, ra)
+                parent[high] = low
+
+        first_file_for_group: dict[str, int] = {}
+        for file_idx, groups in enumerate(file_groups):
+            for group_name in groups:
+                if group_name in first_file_for_group:
+                    union(first_file_for_group[group_name], file_idx)
+                else:
+                    first_file_for_group[group_name] = file_idx
+
+        units_by_root: dict[int, list[ShardItem]] = {}
+        unit_order: list[int] = []
+        for file_idx, file_name in enumerate(file_order):
+            root = find(file_idx)
+            if root not in units_by_root:
+                units_by_root[root] = []
+                unit_order.append(root)
+            units_by_root[root].extend(by_file[file_name])
+
+        return [units_by_root[root] for root in unit_order]
+
+    @staticmethod
+    def _partition(
+        items: Sequence[ShardItem],
+        num_workers: int,
+        *,
+        balance: BalanceStrategy = "round-robin",
+    ) -> list[list[ShardItem]]:
+        units = Coordinator._schedulable_units(items)
+        return Coordinator._partition_units(units, num_workers, balance=balance)
+
+    @staticmethod
+    def _partition_units(
+        units: Sequence[Sequence[ShardItem]],
+        num_workers: int,
+        *,
+        balance: BalanceStrategy = "round-robin",
+    ) -> list[list[ShardItem]]:
         buckets: list[list[ShardItem]] = [[] for _ in range(num_workers)]
-        for index, file_name in enumerate(file_order):
-            buckets[index % num_workers].extend(by_file[file_name])
+        if balance == "count":
+            sorted_unit_indices = sorted(range(len(units)), key=lambda idx: (-len(units[idx]), idx))
+            worker_loads = [0] * num_workers
+            worker_unit_indices: list[list[int]] = [[] for _ in range(num_workers)]
+            for unit_idx in sorted_unit_indices:
+                target_worker = min(
+                    range(num_workers),
+                    key=lambda w: (worker_loads[w], len(worker_unit_indices[w]), w),
+                )
+                worker_unit_indices[target_worker].append(unit_idx)
+                worker_loads[target_worker] += len(units[unit_idx])
+            for worker_id, unit_indices in enumerate(worker_unit_indices):
+                for unit_idx in sorted(unit_indices):
+                    buckets[worker_id].extend(units[unit_idx])
+            return buckets
+
+        for index, unit in enumerate(units):
+            buckets[index % num_workers].extend(unit)
         return buckets
 
     def _forwarded_args(self) -> list[str]:
-        args = []
-        skip_next = False
-        known = self.config.known_args_namespace
-        positionals = set(getattr(known, "file_or_dir", []) or [])
+        invocation_params = getattr(self.config, "invocation_params", None)
+        raw_args = getattr(invocation_params, "args", None)
+        if not isinstance(raw_args, tuple | list):
+            raw_args = sys.argv[1:]
 
-        for arg in sys.argv[1:]:
+        known = getattr(self.config, "known_args_namespace", None)
+        positionals = list(getattr(known, "file_or_dir", []) or [])
+
+        args: list[str] = []
+        skip_next = False
+        keep_next = False
+        after_double_dash = False
+
+        for raw_arg in raw_args:
+            arg = str(raw_arg)
             if skip_next:
                 skip_next = False
                 continue
-            if arg in {"-j", "--jobs"}:
+            if keep_next:
+                keep_next = False
+                args.append(arg)
+                continue
+            if after_double_dash:
+                if arg in positionals:
+                    positionals.remove(arg)
+                    continue
+                args.append(arg)
+                continue
+            if arg == "--":
+                after_double_dash = True
+                continue
+            if arg in _STRIP_VALUE_OPTIONS:
                 skip_next = True
+                continue
+            if arg == "--serial":
                 continue
             if arg.startswith("-j") and arg != "-j":
                 continue
-            if arg.startswith("--jobs="):
+            if arg.startswith(_STRIP_PREFIX_OPTIONS):
+                continue
+            if arg in _KEEP_VALUE_OPTIONS:
+                args.append(arg)
+                keep_next = True
                 continue
             if arg in positionals:
-                positionals.discard(arg)
+                positionals.remove(arg)
                 continue
             args.append(arg)
+
+        plugins = getattr(invocation_params, "plugins", None)
+        if isinstance(plugins, Sequence) and not isinstance(plugins, str | bytes):
+            for plugin in plugins:
+                if isinstance(plugin, str):
+                    args.extend(["-p", plugin])
+                elif isinstance(plugin, types.ModuleType) and getattr(plugin, "__name__", None):
+                    args.extend(["-p", plugin.__name__])
+
         return args
 
     def _spawn(self, active: list[tuple[int, list[str]]]) -> list[tuple[int, Any, Path, Path]]:
         from .worker import run_worker
 
-        context = cast(Any, _multiprocessing_context())
+        work_dir = self._ensure_work_dir()
+        context = cast(Any, _multiprocessing_context(self.start_method))
         forwarded_args = self._forwarded_args()
-        workers = []
-        for index, nodeids in active:
-            result_path = self._work_dir / f"worker_{index}_results.jsonl"
-            output_path = self._work_dir / f"worker_{index}_output.txt"
-            result_path.touch()
-            output_path.touch()
-            env = os.environ.copy()
-            env["PYTEST_PARALLEL_WORKER_ID"] = str(index)
-            env["_PYTEST_PARALLEL_WORKER"] = "1"
-            self.config.hook.pytest_parallel_worker_env(env=env, worker_id=index)
+        workers: list[tuple[int, Any, Path, Path]] = []
+        total_active = len(active)
+        try:
+            for pos, (index, nodeids) in enumerate(active):
+                result_path = work_dir / f"worker_{index}_results.jsonl"
+                output_path = work_dir / f"worker_{index}_output.txt"
+                result_path.touch()
+                output_path.touch()
+                env = os.environ.copy()
+                env["PYTEST_PARALLEL_WORKER_ID"] = str(index)
+                env["_PYTEST_PARALLEL_WORKER"] = "1"
+                if self.ramp > 0.0 and total_active > 1:
+                    delay = self.ramp * pos / (total_active - 1)
+                    env["_PYTEST_PARALLEL_RAMP_DELAY"] = f"{delay:.6f}"
+                try:
+                    term_size = shutil.get_terminal_size()
+                    env.setdefault("COLUMNS", str(term_size.columns))
+                    env.setdefault("LINES", str(term_size.lines))
+                except Exception:
+                    pass
+                self.config.hook.pytest_parallel_worker_env(env=env, worker_id=index)
 
-            process = context.Process(
-                target=run_worker,
-                args=(env, nodeids, forwarded_args, str(self.config.rootpath), result_path, output_path),
-            )
-            process.start()
-            workers.append((index, process, result_path, output_path))
+                process = context.Process(
+                    target=run_worker,
+                    args=(env, nodeids, forwarded_args, str(self.config.rootpath), result_path, output_path),
+                )
+                process.start()
+                workers.append((index, process, result_path, output_path))
+        except BaseException:
+            self._terminate_live_workers(workers)
+            raise
         return workers
 
     def _monitor(
@@ -138,126 +460,791 @@ class Coordinator:
         workers: list[tuple[int, Any, Path, Path]],
         items_by_nodeid: dict[str, ShardItem],
         session: pytest.Session,
+        *,
+        assigned_by_worker: dict[int, list[str]] | None = None,
     ) -> None:
         terminal = session.config.get_terminal_writer()
         terminal_reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        previous_showfspath = getattr(terminal_reporter, "showfspath", None) if terminal_reporter is not None else None
         if terminal_reporter is not None:
-            session.config.pluginmanager.unregister(terminal_reporter, "terminalreporter")
+            terminal_reporter.showfspath = False
 
-        offsets = {index: 0 for index, _, _, _ in workers}
-        reports: list[pytest.TestReport] = []
-        reports_by_nodeid: dict[str, pytest.TestReport] = {}
+        work_dir = self._ensure_work_dir()
+        stop_path = work_dir / "stop"
 
-        alive = {index for index, _, _, _ in workers}
-        while alive:
-            for index, process, result_path, _ in workers:
-                if index not in alive:
-                    continue
-                self._read_results(index, result_path, offsets, terminal, items_by_nodeid, reports, reports_by_nodeid)
-                if not process.is_alive():
-                    alive.discard(index)
-            time.sleep(0.05)
+        worker_states: dict[int, WorkerState] = {}
+        for index, process, result_path, output_path in workers:
+            assigned = (
+                list(assigned_by_worker[index])
+                if assigned_by_worker is not None and index in assigned_by_worker
+                else list(items_by_nodeid.keys())
+            )
+            worker_states[index] = WorkerState(
+                worker_id=index,
+                process=process,
+                result_path=result_path,
+                output_path=output_path,
+                assigned=assigned,
+            )
 
-        for index, _, result_path, _ in workers:
-            self._read_results(index, result_path, offsets, terminal, items_by_nodeid, reports, reports_by_nodeid)
+        try:
+            alive = set(worker_states.keys())
+            global_stop_requested = False
 
-        terminal.line(f"  {self._completed}/{self._total} completed, {self._failed} failed")
-        if self._failed_nodeids:
-            terminal.sep("-", "failed tests")
-            for nodeid in self._failed_nodeids:
-                terminal.line(nodeid, red=True)
+            while alive:
+                for index in list(alive):
+                    state = worker_states[index]
+                    self._read_worker_events(state, items_by_nodeid, session, terminal, final=False)
+                    if (session.shouldfail or session.shouldstop) and not global_stop_requested:
+                        global_stop_requested = True
+                        self._trigger_global_stop(stop_path, worker_states)
+                    if not state.process.is_alive():
+                        alive.discard(index)
+                if alive:
+                    if global_stop_requested:
+                        self._terminate_live_workers(workers)
+                        alive.clear()
+                    else:
+                        time.sleep(0.01)
 
-        for index, process, _, output_path in workers:
-            process.join()
-            if process.exitcode not in {0, 1}:
-                self._failed += 1
-                terminal.sep("-", f"worker {index} crashed with exit code {process.exitcode}")
-                for line in output_path.read_text().splitlines():
-                    terminal.line(line)
+            for state in worker_states.values():
+                state.process.join(timeout=1.0)
+                self._read_worker_events(state, items_by_nodeid, session, terminal, final=True)
 
-        if terminal_reporter is not None:
-            for report in reports:
-                terminal_reporter.stats.setdefault(report.outcome, []).append(report)
-            session.config.pluginmanager.register(terminal_reporter, "terminalreporter")
+            for state in worker_states.values():
+                self._reconcile_worker(state, items_by_nodeid, session, terminal, terminal_reporter)
+        except KeyboardInterrupt:
+            self._trigger_global_stop(stop_path, worker_states)
+            self._terminate_live_workers(workers)
+            raise
+        finally:
+            if terminal_reporter is not None:
+                if previous_showfspath is not None:
+                    terminal_reporter.showfspath = previous_showfspath
+                if session.config.pluginmanager.get_plugin("terminalreporter") is None:
+                    session.config.pluginmanager.register(terminal_reporter, "terminalreporter")
+
+    @staticmethod
+    def _trigger_global_stop(stop_path: Path, worker_states: dict[int, WorkerState]) -> None:
+        try:
+            stop_path.touch()
+        except OSError:
+            pass
+        for state in worker_states.values():
+            if not state.session_finished:
+                state.stopped_by_coordinator = True
 
     @staticmethod
     def _terminate_live_workers(workers: list[tuple[int, Any, Path, Path]]) -> None:
         for _, process, _, _ in workers:
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=1)
+            try:
+                if process.is_alive():
+                    process.terminate()
+            except Exception:
+                pass
+        for _, process, _, _ in workers:
+            try:
+                if process.is_alive():
+                    process.join(timeout=1.0)
+                if process.is_alive() and hasattr(process, "kill"):
+                    process.kill()
+                    process.join(timeout=1.0)
+                elif getattr(process, "pid", None) is not None and getattr(process, "exitcode", None) is None:
+                    process.join(timeout=1.0)
+            except Exception:
+                pass
 
-    def _read_results(
+    def _read_worker_events(
         self,
-        worker_id: int,
-        result_path: Path,
-        offsets: dict[int, int],
-        terminal: Any,
+        state: WorkerState,
         items_by_nodeid: dict[str, ShardItem],
-        reports: list[pytest.TestReport],
-        reports_by_nodeid: dict[str, pytest.TestReport],
+        session: pytest.Session,
+        terminal: Any,
+        *,
+        final: bool,
     ) -> None:
-        with result_path.open() as result_file:
-            result_file.seek(offsets[worker_id])
-            for raw_line in result_file:
-                event = json.loads(raw_line)
-                self._record_event(worker_id, event, terminal)
-                item = items_by_nodeid.get(event["nodeid"])
-                if item is not None:
-                    report = self._make_report(event, item)
-                    if report.nodeid in reports_by_nodeid:
-                        reports[reports.index(reports_by_nodeid[report.nodeid])] = report
-                    else:
-                        reports.append(report)
-                    reports_by_nodeid[report.nodeid] = report
-            offsets[worker_id] = result_file.tell()
+        if not state.result_path.exists():
+            state.protocol_errors.append(f"worker {state.worker_id} result file is missing")
+            return
 
-    def _record_event(self, worker_id: int, event: dict[str, object], terminal: Any) -> None:
-        outcome = str(event["outcome"])
-        nodeid = str(event["nodeid"])
-        duration = float(cast(str | int | float, event.get("duration", 0.0)))
-        if outcome != "rerun":
-            self._completed += 1
-        if outcome == "failed":
+        with state.result_path.open("rb") as result_file:
+            result_file.seek(state.offset)
+            chunk = result_file.read()
+
+        if not chunk:
+            return
+
+        lines = chunk.splitlines(keepends=True)
+        consumed_bytes = 0
+        for raw_bytes in lines:
+            if not raw_bytes.endswith(b"\n"):
+                if final:
+                    consumed_bytes += len(raw_bytes)
+                    snippet = raw_bytes.decode("utf-8", errors="replace").strip()
+                    state.protocol_errors.append(
+                        f"truncated JSONL event at EOF from worker {state.worker_id}: {snippet[:120]!r}"
+                    )
+                break
+            consumed_bytes += len(raw_bytes)
+            line_text = raw_bytes.decode("utf-8", errors="replace").strip()
+            if not line_text:
+                state.protocol_errors.append(f"empty JSONL line from worker {state.worker_id}")
+                continue
+            try:
+                parsed = json.loads(line_text)
+            except json.JSONDecodeError as exc:
+                state.protocol_errors.append(
+                    f"malformed JSON event from worker {state.worker_id}: {exc.msg}"
+                )
+                continue
+            if not isinstance(parsed, dict):
+                state.protocol_errors.append(
+                    f"non-object JSON event from worker {state.worker_id}: {type(parsed).__name__}"
+                )
+                continue
+            self._process_worker_event(state, parsed, items_by_nodeid, session, terminal)
+
+        state.offset += consumed_bytes
+
+    def _process_worker_event(
+        self,
+        state: WorkerState,
+        event: dict[str, Any],
+        items_by_nodeid: dict[str, ShardItem],
+        session: pytest.Session,
+        terminal: Any,
+    ) -> None:
+        version = event.get("v")
+        if version != 1:
+            state.protocol_errors.append(
+                f"unsupported protocol version {version!r} from worker {state.worker_id}"
+            )
+            return
+
+        if state.session_finished:
+            state.protocol_errors.append(
+                f"event {event.get('type')!r} received after session_finish on worker {state.worker_id}"
+            )
+            return
+
+        event_type = event.get("type")
+        if event_type == "collection":
+            self._handle_collection_event(state, event)
+        elif event_type == "collect_report":
+            self._handle_collect_report_event(state, event, session)
+        elif event_type == "test_start":
+            self._handle_test_start_event(state, event, items_by_nodeid)
+        elif event_type == "report":
+            self._handle_report_event(state, event, items_by_nodeid)
+        elif event_type == "test_finish":
+            self._handle_test_finish_event(state, event, session, terminal)
+        elif event_type == "warning":
+            self._handle_warning_event(state, event, session)
+        elif event_type == "internal_error":
+            excrepr = str(event.get("excrepr", "worker internal error"))
+            state.protocol_errors.append(f"worker {state.worker_id} internal error: {excrepr}")
+        elif event_type == "session_finish":
+            self._handle_session_finish_event(state, event)
+        else:
+            state.protocol_errors.append(
+                f"unknown event type {event_type!r} from worker {state.worker_id}"
+            )
+
+    def _handle_collection_event(self, state: WorkerState, event: dict[str, Any]) -> None:
+        if state.collected_nodeids is not None:
+            state.protocol_errors.append(f"duplicate collection event from worker {state.worker_id}")
+            return
+        nodeids = event.get("nodeids")
+        if not isinstance(nodeids, list) or not all(isinstance(x, str) for x in nodeids):
+            state.protocol_errors.append(f"invalid collection nodeids from worker {state.worker_id}")
+            return
+        collected = [str(x) for x in nodeids]
+        state.collected_nodeids = collected
+        if collected != state.assigned:
+            collected_set = set(collected)
+            missing = [n for n in state.assigned if n not in collected_set]
+            extra = [n for n in collected if n not in state.assigned_set]
+            details: list[str] = []
+            if missing:
+                details.append(f"missing={missing}")
+            if extra:
+                details.append(f"extra={extra}")
+            if not details:
+                details.append(f"reordered: expected {state.assigned}, got {collected}")
+            state.protocol_errors.append(
+                f"worker {state.worker_id} collection mismatch ({', '.join(details)})"
+            )
+            return
+        state.collection_verified = True
+
+    def _handle_collect_report_event(
+        self,
+        state: WorkerState,
+        event: dict[str, Any],
+        session: pytest.Session,
+    ) -> None:
+        report_data = event.get("report")
+        if not isinstance(report_data, dict):
+            state.protocol_errors.append(f"invalid collect_report payload from worker {state.worker_id}")
+            return
+        collect_report = self._deserialize_collect_report(report_data)
+        if collect_report is None:
+            state.protocol_errors.append(f"failed to deserialize collect_report from worker {state.worker_id}")
+            return
+        if collect_report.failed:
+            state.collect_failed = True
+        session.config.hook.pytest_collectreport(report=collect_report)
+
+    def _handle_test_start_event(
+        self,
+        state: WorkerState,
+        event: dict[str, Any],
+        items_by_nodeid: dict[str, ShardItem],
+    ) -> None:
+        nodeid = event.get("nodeid")
+        if not isinstance(nodeid, str) or not nodeid:
+            state.protocol_errors.append(f"invalid test_start nodeid from worker {state.worker_id}")
+            return
+        if nodeid not in state.assigned_set:
+            state.protocol_errors.append(
+                f"unexpected test_start for unassigned test {nodeid!r} on worker {state.worker_id}"
+            )
+            return
+        if nodeid in state.started_set or nodeid in state.completed_set:
+            state.protocol_errors.append(
+                f"duplicate test_start for {nodeid!r} on worker {state.worker_id}"
+            )
+            return
+        if state.current_test is not None:
+            state.protocol_errors.append(
+                f"test_start for {nodeid!r} while {state.current_test.nodeid!r} is still active on worker {state.worker_id}"
+            )
+            return
+        expected_index = len(state.started)
+        if expected_index >= len(state.assigned) or state.assigned[expected_index] != nodeid:
+            expected_nodeid = state.assigned[expected_index] if expected_index < len(state.assigned) else None
+            state.protocol_errors.append(
+                f"out-of-order test_start on worker {state.worker_id}: expected {expected_nodeid!r}, got {nodeid!r}"
+            )
+            return
+
+        item = items_by_nodeid.get(nodeid)
+        location = _parse_location(event.get("location"), item, nodeid)
+        state.started.append(nodeid)
+        state.started_set.add(nodeid)
+        state.last_nodeid = nodeid
+        state.current_test = ActiveTestState(nodeid=nodeid, location=location)
+
+    def _handle_report_event(
+        self,
+        state: WorkerState,
+        event: dict[str, Any],
+        items_by_nodeid: dict[str, ShardItem],
+    ) -> None:
+        nodeid = event.get("nodeid")
+        when = event.get("when")
+        outcome = event.get("outcome")
+        duration = event.get("duration")
+
+        if not isinstance(nodeid, str) or not nodeid:
+            state.protocol_errors.append(f"invalid report nodeid from worker {state.worker_id}")
+            return
+        if nodeid not in state.assigned_set:
+            state.protocol_errors.append(
+                f"unexpected report for unassigned test {nodeid!r} on worker {state.worker_id}"
+            )
+            return
+        if not isinstance(when, str) or when not in _VALID_PHASES:
+            state.protocol_errors.append(
+                f"invalid report phase {when!r} for {nodeid!r} on worker {state.worker_id}"
+            )
+            return
+        if not isinstance(outcome, str) or outcome not in _VALID_OUTCOMES:
+            state.protocol_errors.append(
+                f"invalid report outcome {outcome!r} for {nodeid!r} on worker {state.worker_id}"
+            )
+            return
+        if isinstance(duration, bool) or not isinstance(duration, int | float) or not math.isfinite(duration) or duration < 0.0:
+            state.protocol_errors.append(
+                f"invalid report duration {duration!r} for {nodeid!r} on worker {state.worker_id}"
+            )
+            return
+
+        if state.current_test is None or state.current_test.nodeid != nodeid:
+            state.protocol_errors.append(
+                f"report for {nodeid!r} ({when}) without matching active test on worker {state.worker_id}"
+            )
+            return
+
+        active = state.current_test
+        if when in active.reports:
+            state.protocol_errors.append(
+                f"duplicate {when!r} report for {nodeid!r} on worker {state.worker_id}"
+            )
+            return
+        if when == "setup" and active.reports:
+            state.protocol_errors.append(
+                f"out-of-order setup report for {nodeid!r} on worker {state.worker_id}"
+            )
+            return
+        if when == "call":
+            setup_rep = active.reports.get("setup")
+            if setup_rep is None or "teardown" in active.reports or not setup_rep.passed:
+                state.protocol_errors.append(
+                    f"invalid call phase transition for {nodeid!r} on worker {state.worker_id}"
+                )
+                return
+        if when == "teardown" and "setup" not in active.reports:
+            state.protocol_errors.append(
+                f"teardown report before setup for {nodeid!r} on worker {state.worker_id}"
+            )
+            return
+
+        item = items_by_nodeid.get(nodeid)
+        report = self._deserialize_test_report(event, item, active.location)
+        if report is None:
+            state.protocol_errors.append(
+                f"invalid serialized TestReport for {nodeid!r} ({when}) on worker {state.worker_id}"
+            )
+            return
+
+        state.last_nodeid = nodeid
+        active.reports[when] = report
+        if report.failed and not hasattr(report, "wasxfail") and nodeid not in state.failed_nodeids:
+            state.failed_nodeids.append(nodeid)
             self._failed += 1
             self._failed_nodeids.append(nodeid)
 
-        if self.config.option.verbose > 0:
-            terminal.line(f"[w{worker_id}] {nodeid} {outcome.upper()} ({duration:.2f}s)")
-        else:
-            terminal.write(_OUTCOME_CHARS.get(outcome, "?"))
+    def _handle_test_finish_event(
+        self,
+        state: WorkerState,
+        event: dict[str, Any],
+        session: pytest.Session,
+        terminal: Any,
+    ) -> None:
+        nodeid = event.get("nodeid")
+        if not isinstance(nodeid, str) or not nodeid:
+            state.protocol_errors.append(f"invalid test_finish nodeid from worker {state.worker_id}")
+            return
+        if state.current_test is None or state.current_test.nodeid != nodeid:
+            state.protocol_errors.append(
+                f"test_finish for {nodeid!r} without matching active test on worker {state.worker_id}"
+            )
+            return
+        if nodeid in state.completed_set:
+            state.protocol_errors.append(
+                f"duplicate test_finish for {nodeid!r} on worker {state.worker_id}"
+            )
+            return
+
+        active = state.current_test
+        setup_rep = active.reports.get("setup")
+        teardown_rep = active.reports.get("teardown")
+        if setup_rep is None or teardown_rep is None:
+            state.protocol_errors.append(
+                f"incomplete phase reports for {nodeid!r} at test_finish on worker {state.worker_id}"
+            )
+            return
+        setuponly = bool(getattr(self.config.option, "setuponly", False))
+        if setup_rep.passed and not setuponly and "call" not in active.reports:
+            state.protocol_errors.append(
+                f"missing call report for passed setup on {nodeid!r} on worker {state.worker_id}"
+            )
+            return
+
+        state.current_test = None
+        state.completed.append(nodeid)
+        state.completed_set.add(nodeid)
+        state.last_nodeid = nodeid
+        self._completed += 1
+
+        session.config.hook.pytest_runtest_logstart(nodeid=active.nodeid, location=active.location)
+        uncaptured_stdout = event.get("stdout")
+        if isinstance(uncaptured_stdout, str) and uncaptured_stdout:
+            terminal.write(uncaptured_stdout)
             terminal.flush()
+        for phase in _PHASE_ORDER:
+            phase_report = active.reports.get(phase)
+            if phase_report is not None:
+                session.config.hook.pytest_runtest_logreport(report=phase_report)
+        session.config.hook.pytest_runtest_logfinish(nodeid=active.nodeid, location=active.location)
 
-        if outcome == "failed" and event.get("longrepr"):
+    def _handle_warning_event(
+        self,
+        state: WorkerState,
+        event: dict[str, Any],
+        session: pytest.Session,
+    ) -> None:
+        message_text = event.get("message")
+        category_module = event.get("category_module")
+        category_name = event.get("category_name")
+        filename = event.get("filename")
+        lineno = event.get("lineno")
+        when = event.get("when", "runtest")
+        nodeid = event.get("nodeid", "")
+        raw_location = event.get("location")
+
+        if (
+            not isinstance(message_text, str)
+            or not isinstance(category_module, str)
+            or not isinstance(category_name, str)
+            or not isinstance(filename, str)
+            or isinstance(lineno, bool)
+            or not isinstance(lineno, int)
+            or not isinstance(when, str)
+            or not isinstance(nodeid, str)
+        ):
+            state.protocol_errors.append(f"invalid warning event from worker {state.worker_id}")
+            return
+
+        category = _resolve_warning_category(category_module, category_name)
+        warning_msg = warnings.WarningMessage(
+            message=category(message_text),
+            category=category,
+            filename=filename,
+            lineno=lineno,
+            line=event.get("line") if isinstance(event.get("line"), str) else None,
+        )
+        location: tuple[str, int, str] | None = None
+        if isinstance(raw_location, list) and len(raw_location) == 3:
+            location = (str(raw_location[0]), int(raw_location[1]), str(raw_location[2]))
+
+        session.config.hook.pytest_warning_recorded.call_historic(
+            kwargs={
+                "warning_message": warning_msg,
+                "when": when,
+                "nodeid": nodeid,
+                "location": location,
+            }
+        )
+
+    def _handle_session_finish_event(self, state: WorkerState, event: dict[str, Any]) -> None:
+        exitstatus = event.get("exitstatus")
+        if isinstance(exitstatus, bool) or not isinstance(exitstatus, int):
+            state.protocol_errors.append(
+                f"invalid session_finish exitstatus {exitstatus!r} from worker {state.worker_id}"
+            )
+            return
+        if state.current_test is not None:
+            state.protocol_errors.append(
+                f"session_finish while {state.current_test.nodeid!r} is still active on worker {state.worker_id}"
+            )
+            return
+        state.session_finished = True
+        state.session_exitstatus = exitstatus
+        shouldstop = event.get("shouldstop")
+        shouldfail = event.get("shouldfail")
+        state.session_shouldstop = str(shouldstop) if shouldstop is not None else None
+        state.session_shouldfail = str(shouldfail) if shouldfail is not None else None
+
+    def _reconcile_worker(
+        self,
+        state: WorkerState,
+        items_by_nodeid: dict[str, ShardItem],
+        session: pytest.Session,
+        terminal: Any,
+        terminal_reporter: Any,
+    ) -> None:
+        exitcode = state.process.exitcode
+        global_stopped = bool(state.stopped_by_coordinator or session.shouldfail or session.shouldstop)
+
+        if global_stopped and not state.protocol_errors:
+            return
+
+        if state.collect_failed and not state.protocol_errors and state.current_test is None:
+            return
+
+        failure_reasons: list[str] = list(state.protocol_errors)
+        exit_desc = _format_exit_status(exitcode)
+
+        if state.current_test is not None:
+            failure_reasons.append(
+                f"worker {state.worker_id} terminated prematurely ({exit_desc}) during {state.current_test.nodeid}"
+            )
+
+        if state.session_shouldstop:
+            failure_reasons.append(
+                f"worker {state.worker_id} stopped early: {state.session_shouldstop}"
+            )
+
+        if not state.session_finished and state.current_test is None:
+            failure_reasons.append(
+                f"worker {state.worker_id} exited without completing session ({exit_desc})"
+            )
+
+        unreported = state.unreported
+        if unreported:
+            preview = ", ".join(unreported[:5])
+            if len(unreported) > 5:
+                preview += f", ... (+{len(unreported) - 5} more)"
+            failure_reasons.append(
+                f"worker {state.worker_id} left {len(unreported)} assigned test(s) unreported: {preview}"
+            )
+
+        expected_exit = 1 if state.failed_nodeids else 0
+        if not failure_reasons and (exitcode != expected_exit or state.session_exitstatus != expected_exit):
+            failure_reasons.append(
+                f"worker {state.worker_id} exit status mismatch: process={exit_desc}, "
+                f"session={state.session_exitstatus}, expected={expected_exit}"
+            )
+
+        if not failure_reasons:
+            return
+
+        output_text = ""
+        if state.output_path.exists():
+            try:
+                output_text = state.output_path.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                output_text = ""
+
+        diag_lines = [
+            f"worker {state.worker_id} failure ({exit_desc})",
+            f"last known test: {state.last_nodeid or '<none>'}",
+            *failure_reasons,
+        ]
+        if output_text:
+            diag_lines.append("--- worker output ---")
+            diag_lines.extend(output_text.splitlines())
+        longrepr_text = "\n".join(diag_lines)
+
+        if state.current_test is not None:
+            active = state.current_test
+            state.current_test = None
+            session.config.hook.pytest_runtest_logstart(nodeid=active.nodeid, location=active.location)
+            for phase in _PHASE_ORDER:
+                if phase in active.reports:
+                    session.config.hook.pytest_runtest_logreport(report=active.reports[phase])
+            missing_phase: ReportPhase = (
+                "setup"
+                if "setup" not in active.reports
+                else ("call" if "call" not in active.reports and active.reports["setup"].passed else "teardown")
+            )
+            crash_report = pytest.TestReport(
+                nodeid=active.nodeid,
+                location=active.location,
+                keywords={},
+                outcome="failed",
+                longrepr=longrepr_text,
+                when=missing_phase,
+                duration=0.0,
+            )
+            session.config.hook.pytest_runtest_logreport(report=crash_report)
+            session.config.hook.pytest_runtest_logfinish(nodeid=active.nodeid, location=active.location)
+        else:
+            target_nodeid = unreported[0] if unreported else (state.last_nodeid or f"<worker_{state.worker_id}>")
+            target_item = items_by_nodeid.get(target_nodeid)
+            target_location = target_item.location if target_item is not None else (target_nodeid.partition("::")[0], None, target_nodeid)
+            crash_report = pytest.TestReport(
+                nodeid=target_nodeid,
+                location=target_location,
+                keywords={},
+                outcome="failed",
+                longrepr=longrepr_text,
+                when="setup",
+                duration=0.0,
+            )
+            session.config.hook.pytest_runtest_logstart(nodeid=target_nodeid, location=target_location)
+            session.config.hook.pytest_runtest_logreport(report=crash_report)
+            session.config.hook.pytest_runtest_logfinish(nodeid=target_nodeid, location=target_location)
+
+        if state.last_nodeid and state.last_nodeid not in self._failed_nodeids:
+            self._failed_nodeids.append(state.last_nodeid)
+        self._failed += 1
+        if session.testsfailed == 0:
+            session.testsfailed += 1
+
+        if terminal_reporter is not None and hasattr(terminal_reporter, "ensure_newline"):
+            terminal_reporter.ensure_newline()
+        else:
             terminal.line("")
-            terminal.line(f"FAILED {nodeid} ({duration:.2f}s)", red=True)
-            for line in str(event["longrepr"]).splitlines():
-                terminal.line(f"    {line}")
+        terminal.sep("-", f"worker {state.worker_id} failed ({exit_desc})")
+        for line in diag_lines:
+            terminal.line(line)
 
-    @staticmethod
-    def _make_report(event: dict[str, object], item: ShardItem) -> pytest.TestReport:
-        outcome = _coerce_outcome(event["outcome"])
-        return pytest.TestReport(
-            nodeid=str(event["nodeid"]),
-            location=item.location,
+    def _deserialize_test_report(
+        self,
+        event: dict[str, Any],
+        item: ShardItem | None,
+        fallback_location: tuple[str, int | None, str],
+    ) -> pytest.TestReport | None:
+        nodeid = str(event["nodeid"])
+        when = cast(ReportPhase, str(event["when"]))
+        outcome = cast(ReportOutcome, str(event["outcome"]))
+        duration = float(event["duration"])
+
+        raw_report = event.get("report")
+        if isinstance(raw_report, dict):
+            data = dict(raw_report)
+            data.setdefault("$report_type", "TestReport")
+            try:
+                restored = self.config.hook.pytest_report_from_serializable(config=self.config, data=dict(data))
+                if not isinstance(restored, pytest.TestReport):
+                    restored = pytest.TestReport._from_json(dict(data))
+            except Exception:
+                return None
+            _normalize_deserialized_report(restored)
+            if restored.nodeid != nodeid or restored.when != when or restored.outcome != outcome:
+                return None
+            return restored
+
+        location = item.location if item is not None else fallback_location
+        report = pytest.TestReport(
+            nodeid=nodeid,
+            location=location,
             keywords={},
             outcome=outcome,
             longrepr=cast(Any, event.get("longrepr")),
-            when="call",
-            duration=float(cast(str | int | float, event.get("duration", 0.0))),
+            when=when,
+            duration=duration,
         )
+        wasxfail = event.get("wasxfail")
+        if isinstance(wasxfail, str):
+            report.wasxfail = wasxfail
+        return report
+
+    def _deserialize_collect_report(self, raw_report: dict[str, Any]) -> pytest.CollectReport | None:
+        data = dict(raw_report)
+        data.setdefault("$report_type", "CollectReport")
+        try:
+            restored = self.config.hook.pytest_report_from_serializable(config=self.config, data=dict(data))
+            if not isinstance(restored, pytest.CollectReport):
+                restored = pytest.CollectReport._from_json(dict(data))
+        except Exception:
+            return None
+        _normalize_deserialized_report(restored)
+        return restored
 
 
-def _multiprocessing_context() -> multiprocessing.context.BaseContext:
-    if sys.platform == "darwin":
-        return multiprocessing.get_context("spawn")
-    if sys.platform.startswith("linux"):
-        return multiprocessing.get_context("fork")
-    return multiprocessing.get_context("spawn")
+def _normalize_deserialized_report(report: Any) -> None:
+    loc = getattr(report, "location", None)
+    if isinstance(loc, list) and len(loc) == 3:
+        report.location = (str(loc[0]), int(loc[1]) if loc[1] is not None else None, str(loc[2]))
+    longrepr = getattr(report, "longrepr", None)
+    if isinstance(longrepr, list) and len(longrepr) == 3:
+        report.longrepr = (
+            str(longrepr[0]),
+            int(longrepr[1]) if longrepr[1] is not None else None,
+            str(longrepr[2]),
+        )
+    sections = getattr(report, "sections", None)
+    if isinstance(sections, list):
+        report.sections = [
+            (str(sec[0]), str(sec[1]))
+            for sec in sections
+            if isinstance(sec, list | tuple) and len(sec) == 2
+        ]
+    user_props = getattr(report, "user_properties", None)
+    if isinstance(user_props, list):
+        report.user_properties = [
+            (str(prop[0]), prop[1])
+            for prop in user_props
+            if isinstance(prop, list | tuple) and len(prop) == 2
+        ]
 
 
-def _assert_safe_to_start_workers() -> None:
-    if not sys.platform.startswith("linux"):
+def _parse_location(
+    raw_location: Any,
+    item: ShardItem | None,
+    nodeid: str,
+) -> tuple[str, int | None, str]:
+    if isinstance(raw_location, list | tuple) and len(raw_location) == 3:
+        lineno = int(raw_location[1]) if isinstance(raw_location[1], int) and not isinstance(raw_location[1], bool) else None
+        return (str(raw_location[0]), lineno, str(raw_location[2]))
+    if item is not None:
+        return item.location
+    return (nodeid.partition("::")[0], None, nodeid)
+
+
+def _format_exit_status(exitcode: int | None) -> str:
+    if exitcode is None:
+        return "still running"
+    if exitcode < 0:
+        sig_num = -exitcode
+        try:
+            sig_name = signal.Signals(sig_num).name
+            return f"killed by signal {sig_num} ({sig_name}), exit code {exitcode}"
+        except ValueError:
+            return f"killed by signal {sig_num}, exit code {exitcode}"
+    return f"exit code {exitcode}"
+
+
+def _resolve_warning_category(module_name: str, qualname: str) -> type[Warning]:
+    if module_name == "builtins":
+        candidate = getattr(builtins, qualname, None)
+        if isinstance(candidate, type) and issubclass(candidate, Warning):
+            return candidate
+    mod = sys.modules.get(module_name)
+    if mod is not None:
+        obj: Any = mod
+        for part in qualname.split("."):
+            obj = getattr(obj, part, None)
+        if isinstance(obj, type) and issubclass(obj, Warning):
+            return obj
+    short_name = qualname.rsplit(".", 1)[-1]
+    return type(short_name, (Warning,), {"__module__": module_name, "__qualname__": qualname})
+
+
+def _extract_parallel_groups(item: ShardItem) -> list[str]:
+    iter_markers = getattr(item, "iter_markers", None)
+    if not callable(iter_markers):
+        return []
+    try:
+        markers = list(iter_markers("parallel_group"))
+    except TypeError:
+        return []
+
+    groups: list[str] = []
+    for mark in markers:
+        kwargs = getattr(mark, "kwargs", {}) or {}
+        args = getattr(mark, "args", ()) or ()
+        unknown_kwargs = set(kwargs.keys()) - {"name"}
+        if unknown_kwargs:
+            unknown_str = ", ".join(sorted(unknown_kwargs))
+            raise pytest.UsageError(
+                f"parallel_group marker received unexpected keyword argument(s): {unknown_str}"
+            )
+        raw_names = list(args)
+        if "name" in kwargs:
+            raw_names.append(kwargs["name"])
+        if not raw_names:
+            raise pytest.UsageError("parallel_group marker requires at least one non-empty group name")
+        for raw_name in raw_names:
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                raise pytest.UsageError(
+                    f"parallel_group marker requires non-empty string group names, got {raw_name!r}"
+                )
+            groups.append(raw_name.strip())
+    return groups
+
+
+def _resolve_start_method_name(start_method: StartMethod | None = None) -> str:
+    if start_method is None or start_method == "auto":
+        if sys.platform == "darwin":
+            return "spawn"
+        if sys.platform.startswith("linux"):
+            return "fork"
+        return "spawn"
+    if start_method not in {"fork", "spawn", "forkserver"}:
+        raise pytest.UsageError(
+            f"Invalid --parallel-start-method {start_method!r}; expected 'auto', 'fork', 'spawn', or 'forkserver'."
+        )
+    return start_method
+
+
+def _multiprocessing_context(start_method: StartMethod | None = None) -> multiprocessing.context.BaseContext:
+    method_name = _resolve_start_method_name(start_method)
+    try:
+        return multiprocessing.get_context(method_name)
+    except ValueError as exc:
+        raise pytest.UsageError(
+            f"Multiprocessing start method {method_name!r} is not supported on platform {sys.platform!r}."
+        ) from exc
+
+
+def _assert_safe_to_start_workers(start_method: StartMethod | None = None) -> None:
+    method_name = _resolve_start_method_name(start_method)
+    if method_name != "fork":
         return
 
     threads = _active_non_main_threads()
@@ -266,17 +1253,10 @@ def _assert_safe_to_start_workers() -> None:
         raise pytest.UsageError(
             "pytest-parallel cannot safely fork with active background threads. "
             f"Active threads: {names}. Stop these threads before pytest_runtestloop, use --serial, "
-            "or run on a platform/start method that uses spawn."
+            "or pass --parallel-start-method=spawn."
         )
 
 
 def _active_non_main_threads() -> list[threading.Thread]:
     main_thread = threading.main_thread()
     return [thread for thread in threading.enumerate() if thread is not main_thread and thread.is_alive()]
-
-
-def _coerce_outcome(value: object) -> ReportOutcome:
-    outcome = str(value)
-    if outcome in {"passed", "failed", "skipped"}:
-        return cast(ReportOutcome, outcome)
-    return "failed"
