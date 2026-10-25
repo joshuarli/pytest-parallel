@@ -3,7 +3,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from typing import Any
 
@@ -33,7 +33,7 @@ _BLOCKED_MESSAGE = (
 
 
 @contextmanager
-def network_blocked() -> Iterator[None]:
+def network_blocked() -> Generator[None]:
     originals: list[tuple[Any, str, Callable[..., Any]]] = []
     try:
         for name in _SOCKET_METHODS:

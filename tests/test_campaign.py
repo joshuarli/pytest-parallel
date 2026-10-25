@@ -341,11 +341,17 @@ def test_collection_mismatch_spawn_and_forkserver(tmp_path: Path) -> None:
         assert "mismatch" in res.stdout.lower()
 
 
-def test_xdist_conflict_or_skip(tmp_path: Path) -> None:
-    pytest.importorskip("xdist")
+def test_numprocesses_conflict(tmp_path: Path) -> None:
+    (tmp_path / "conftest.py").write_text(
+        "def pytest_addoption(parser):\n"
+        '    parser.addoption("--numprocesses", dest="numprocesses", default=None)\n'
+    )
     (tmp_path / "test_a.py").write_text("def test_a():\n assert True\n")
-    res = _run([str(tmp_path), "-n", "2", "-q"], tmp_path)
+    res = _run([str(tmp_path), "--numprocesses", "2", "-q"], tmp_path)
     assert res.returncode == int(pytest.ExitCode.USAGE_ERROR), res.stdout
+    assert "cannot distribute the same run" in res.stdout, res.stdout
+    serial = _run([str(tmp_path), "--numprocesses", "2", "--serial", "-q"], tmp_path)
+    assert serial.returncode == 0, serial.stdout
 
 
 def test_setup_plan_falls_back_to_serial(tmp_path: Path) -> None:

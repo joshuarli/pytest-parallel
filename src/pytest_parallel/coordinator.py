@@ -126,7 +126,8 @@ _KEEP_VALUE_OPTIONS: frozenset[str] = frozenset(
 
 
 class ShardItem(Protocol):
-    nodeid: str
+    @property
+    def nodeid(self) -> str: ...
     location: tuple[str, int | None, str]
 
 

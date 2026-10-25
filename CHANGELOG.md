@@ -20,7 +20,8 @@
 
 ### Compatibility and quality
 
-- CI now covers Linux and macOS on Python 3.13/3.14, Linux start-method smoke tests, and a non-blocking pytest pre-release job. Windows remains untested and unsupported.
+- Remove the pytest-xdist dev dependency: the `-n`/`--numprocesses` conflict test now stubs the option instead of installing xdist. The suite runs under pytest-parallel's own distribution.
+- CI now covers Linux and macOS on Python 3.15, Linux start-method smoke tests, and a non-blocking pytest pre-release job. Windows remains untested and unsupported.
 - Add an honest benchmark harness (`benchmarks/run_benchmarks.py`) and results in `docs/benchmarks.md`; misleading startup/memory metrics are not reported.
 
 ### Correctness and reliability (P0)
