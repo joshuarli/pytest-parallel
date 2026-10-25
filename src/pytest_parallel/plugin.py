@@ -9,8 +9,6 @@ from typing import Literal
 
 import pytest
 
-__version__ = "0.2.0"
-
 _DEFAULT_MAX_WORKERS = 64
 _RAMP_PATTERN = re.compile(r"^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[+-]?(?:inf|infinity|nan))\s*([smhSMH]?)$")
 
@@ -243,11 +241,14 @@ def _parse_jobs(value: object) -> int:
 
 
 def _auto_cpu_count() -> int:
-    process_count = getattr(os, "process_cpu_count", None)
-    count = process_count() if callable(process_count) else None
-    if count is None:
-        count = os.cpu_count()
-    return count if isinstance(count, int) and count > 0 else 1
+    for candidate in (os.process_cpu_count, os.cpu_count):
+        try:
+            count = candidate()
+        except NotImplementedError:
+            continue
+        if isinstance(count, int) and count > 0:
+            return count
+    return 1
 
 
 def _parse_ramp(value: object) -> float:

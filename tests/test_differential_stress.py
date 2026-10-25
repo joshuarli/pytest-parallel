@@ -7,6 +7,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -265,7 +266,12 @@ def measure_suite_benchmark(suite_dir: Path, extra_args: list[str], scratch_tmp:
         count = int(file_path.stem.rsplit("_", 1)[-1])
         file_unit = FileUnit(path=file_path, key=file_path.name, ordinal=len(files))
         file_unit.weight = float(count)
-        file_unit.items = list(range(count))
+        for i in range(count):
+            item = Mock()
+            nodeid = f"{file_path.name}::test_{i}"
+            item.nodeid = nodeid
+            item.location = (file_path.name, None, nodeid)
+            file_unit.items.append(item)
         files.append(file_unit)
     buckets = assign_units(merge_units(files), 2, balance=balance)
     loads = [sum(unit.weight for unit in bucket) for bucket in buckets if bucket]

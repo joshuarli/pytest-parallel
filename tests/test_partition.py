@@ -9,6 +9,7 @@ import pytest
 
 from pytest_parallel.coordinator import (
     Coordinator,
+    PlannedWorker,
     _assert_safe_to_start_workers,
     _extract_parallel_groups,
     _multiprocessing_context,
@@ -111,7 +112,7 @@ def test_spawn_uses_multiprocessing_context(tmp_path):
         patch("pytest_parallel.coordinator._multiprocessing_context", return_value=context),
         patch.object(coordinator, "_forwarded_args", return_value=[]),
     ):
-        workers = coordinator._spawn([(0, ["tests/test_example.py::test_ok"])])
+        workers = coordinator._spawn([PlannedWorker(0, ["tests/test_example.py::test_ok"], 0)])
 
     args = context.Process.call_args.kwargs["args"]
     assert args[0]["PYTEST_PARALLEL_WORKER_ID"] == "0"

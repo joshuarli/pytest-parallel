@@ -62,7 +62,7 @@ class ResultReporter:
             time.sleep(min(0.02, remaining))
 
     @contextmanager
-    def _record_uncaptured_phase_output(self) -> IteratorOrGenerator:
+    def _record_uncaptured_phase_output(self) -> Generator[None]:
         if self._capture_mode != "no" or self.output_path is None:
             yield
             return
@@ -232,9 +232,6 @@ class ResultReporter:
         data = report._to_json()
         data["$report_type"] = report.__class__.__name__
         return data
-
-
-IteratorOrGenerator = Generator[None]
 
 
 def run_worker(

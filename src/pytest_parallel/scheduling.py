@@ -4,18 +4,24 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import pytest
 
 from .api import Shard
 
 
+class ShardItem(Protocol):
+    @property
+    def nodeid(self) -> str: ...
+    location: tuple[str, int | None, str]
+
+
 @dataclass
 class FileUnit:
     path: Path
     key: str
-    items: list[Any] = field(default_factory=list)
+    items: list[ShardItem] = field(default_factory=list)
     groups: set[str] = field(default_factory=set)
     weight: float = 0.0
     ordinal: int = 0
@@ -24,7 +30,7 @@ class FileUnit:
 @dataclass
 class Unit:
     files: tuple[Path, ...]
-    items: list[Any]
+    items: list[ShardItem]
     weight: float
     groups: tuple[str, ...]
     ordinal: int
@@ -100,7 +106,7 @@ def merge_units(files: Sequence[FileUnit]) -> list[Unit]:
     units: list[Unit] = []
     for root in order:
         members = by_root[root]
-        items: list[Any] = []
+        items: list[ShardItem] = []
         for member in members:
             items.extend(member.items)
         groups = tuple(sorted({name for member in members for name in member.groups}))

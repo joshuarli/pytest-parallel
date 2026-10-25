@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from pytest_parallel.coordinator import Coordinator
+from pytest_parallel.coordinator import Coordinator, PlannedWorker
 
 
 def _clean_env() -> dict[str, str]:
@@ -279,7 +279,9 @@ def test_spawn_failure_cleans_up_earlier_workers(tmp_path: Path) -> None:
         patch("pytest_parallel.coordinator._multiprocessing_context", return_value=context),
         pytest.raises(RuntimeError, match="spawn failed"),
     ):
-        coordinator._spawn([(0, ["a.py::test_1"]), (1, ["b.py::test_1"])])
+        coordinator._spawn(
+            [PlannedWorker(0, ["a.py::test_1"], 0), PlannedWorker(1, ["b.py::test_1"], 1)]
+        )
 
     p0.terminate.assert_called_once()
 

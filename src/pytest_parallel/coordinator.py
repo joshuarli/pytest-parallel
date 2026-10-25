@@ -17,12 +17,12 @@ import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import pytest
 
 from .plugin import _DEFAULT_MAX_WORKERS, BalanceStrategy, StartMethod
-from .scheduling import FileUnit, Unit, assign_units, format_plan_text, merge_units, plan_dict
+from .scheduling import FileUnit, ShardItem, Unit, assign_units, format_plan_text, merge_units, plan_dict
 from .scheduling import validate_group_names as _validate_hook_groups
 from .scheduling import validate_weight as _validate_hook_weight
 
@@ -30,6 +30,12 @@ PLAN_PRINTED = pytest.StashKey[bool]()
 
 ReportOutcome = Literal["passed", "failed", "skipped"]
 ReportPhase = Literal["setup", "call", "teardown"]
+
+
+class PlannedWorker(NamedTuple):
+    index: int
+    nodeids: list[str]
+    ramp_rank: int
 
 _VALID_OUTCOMES: frozenset[str] = frozenset({"passed", "failed", "skipped"})
 _VALID_PHASES: frozenset[str] = frozenset({"setup", "call", "teardown"})
@@ -74,18 +80,7 @@ _STRIP_VALUE_OPTIONS: frozenset[str] = frozenset(
     }
 )
 
-_STRIP_PREFIX_OPTIONS: tuple[str, ...] = (
-    "--jobs=",
-    "--ramp=",
-    "--parallel-balance=",
-    "--parallel-plan=",
-    "--parallel-start-method=",
-    "--basetemp=",
-    "--log-file=",
-    "--rootdir=",
-    "--junitxml=",
-    "--junit-xml=",
-)
+_STRIP_PREFIX_OPTIONS: tuple[str, ...] = tuple(f"{option}=" for option in sorted(_STRIP_VALUE_OPTIONS))
 
 _STRIP_FLAG_OPTIONS: frozenset[str] = frozenset({"--lf", "--ff", "--nf", "--cache-clear", "--sw", "--stepwise"})
 
@@ -123,12 +118,6 @@ _KEEP_VALUE_OPTIONS: frozenset[str] = frozenset(
         "--tb",
     }
 )
-
-
-class ShardItem(Protocol):
-    @property
-    def nodeid(self) -> str: ...
-    location: tuple[str, int | None, str]
 
 
 @dataclass
@@ -203,7 +192,7 @@ class Coordinator:
             if explicit_basetemp:
                 base = Path(explicit_basetemp)
                 if not base.is_absolute():
-                    rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+                    rootpath = _config_rootpath(self.config)
                     base = rootpath / base
                 base.mkdir(parents=True, exist_ok=True)
                 self._work_dir = Path(tempfile.mkdtemp(prefix="pytest_parallel_", dir=base))
@@ -212,7 +201,7 @@ class Coordinator:
         return self._work_dir
 
     def show_plan(self, session: pytest.Session, mode: str) -> bool:
-        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+        rootpath = _config_rootpath(self.config)
         if not session.items:
             plan = plan_dict([], [], balance=self.balance, pins={}, rootpath=rootpath)
         else:
@@ -225,11 +214,11 @@ class Coordinator:
         self.config.stash[PLAN_PRINTED] = True
         return True
 
-    def build_plan(self, items: Sequence[Any]) -> dict[str, Any]:
+    def build_plan(self, items: Sequence[ShardItem]) -> dict[str, Any]:
         _, plan, _ = self._build_plan(items)
         return plan
 
-    def _build_plan(self, items: Sequence[Any]) -> tuple[list[list[Any]], dict[str, Any], list[list[Unit]]]:
+    def _build_plan(self, items: Sequence[ShardItem]) -> tuple[list[list[ShardItem]], dict[str, Any], list[list[Unit]]]:
         session = getattr(items[0], "session", None) if items else None
         units = self._build_units(items, session)
         max_workers = self._resolve_max_workers()
@@ -237,13 +226,13 @@ class Coordinator:
         num_workers = max(1, min(self.requested_workers, len(units), max_workers))
         pins = self._resolve_pins(units, num_workers, session)
         buckets = assign_units(units, num_workers, balance=self.balance, pins=pins)
-        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+        rootpath = _config_rootpath(self.config)
         plan = plan_dict(buckets, units, balance=self.balance, pins=pins, rootpath=rootpath)
         groups = [[item for unit in bucket for item in unit.items] for bucket in buckets]
         return groups, plan, buckets
 
-    def _build_units(self, items: Sequence[Any], session: Any | None = None) -> list[Unit]:
-        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+    def _build_units(self, items: Sequence[ShardItem], session: Any | None = None) -> list[Unit]:
+        rootpath = _config_rootpath(self.config)
         files: list[FileUnit] = []
         by_key: dict[str, FileUnit] = {}
         for item in items:
@@ -324,13 +313,13 @@ class Coordinator:
         key_path = Path(file_unit.key)
         if key_path.is_absolute():
             return key_path
-        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+        rootpath = _config_rootpath(self.config)
         return rootpath / file_unit.path
 
     def _absolute_unit_path(self, path: Path) -> Path:
         if path.is_absolute():
             return path
-        rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+        rootpath = _config_rootpath(self.config)
         return rootpath / path
 
     def _shard_worker_results(self, caller: Any, session: Any | None, unit: Unit, num_workers: int) -> list[Any]:
@@ -407,18 +396,18 @@ class Coordinator:
             spawn_order = sorted(range(len(buckets)), key=lambda w: (-loads[w], w))
             rank = {worker_id: pos for pos, worker_id in enumerate(spawn_order)}
             active = [
-                (index, [item.nodeid for item in group], rank[index])
+                PlannedWorker(index, [item.nodeid for item in group], rank[index])
                 for index, group in enumerate(groups)
                 if group
             ]
-            active.sort(key=lambda entry: entry[2])
+            active.sort(key=lambda entry: entry.ramp_rank)
             _assert_safe_to_start_workers(self.start_method)
             workers = self._spawn(active)
             self._monitor(
                 workers,
                 {item.nodeid: item for item in session.items},
                 session,
-                assigned_by_worker={index: nodeids for index, nodeids, _ in active},
+                assigned_by_worker={entry.index: entry.nodeids for entry in active},
             )
 
             if session.shouldfail:
@@ -603,12 +592,12 @@ class Coordinator:
         if explicit_basetemp:
             base = Path(explicit_basetemp)
             if not base.is_absolute():
-                rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+                rootpath = _config_rootpath(self.config)
                 base = rootpath / base
             return base / f"worker-{worker_id}"
         return self._ensure_work_dir() / "basetemp" / f"worker-{worker_id}"
 
-    def _spawn(self, active: list[Any]) -> list[tuple[int, Any, Path, Path]]:
+    def _spawn(self, active: Sequence[PlannedWorker]) -> list[tuple[int, Any, Path, Path]]:
         from .worker import run_worker
 
         work_dir = self._ensure_work_dir()
@@ -616,7 +605,7 @@ class Coordinator:
         if explicit_basetemp:
             base = Path(explicit_basetemp)
             if not base.is_absolute():
-                rootpath = self.config.rootpath if isinstance(getattr(self.config, "rootpath", None), Path) else Path.cwd()
+                rootpath = _config_rootpath(self.config)
                 base = rootpath / base
             base.mkdir(parents=True, exist_ok=True)
         else:
@@ -625,9 +614,8 @@ class Coordinator:
         workers: list[tuple[int, Any, Path, Path]] = []
         total_active = len(active)
         try:
-            for pos, entry in enumerate(active):
-                index, nodeids = entry[0], entry[1]
-                ramp_rank = entry[2] if len(entry) > 2 else pos
+            for entry in active:
+                index, nodeids = entry.index, entry.nodeids
                 forwarded_args = self._forwarded_args(worker_id=index)
                 result_path = work_dir / f"worker_{index}_results.jsonl"
                 output_path = work_dir / f"worker_{index}_output.txt"
@@ -638,7 +626,7 @@ class Coordinator:
                 env["PYTEST_PARALLEL_WORKER_ID"] = str(index)
                 env["_PYTEST_PARALLEL_WORKER"] = "1"
                 if self.ramp > 0.0 and total_active > 1:
-                    delay = self.ramp * ramp_rank / (total_active - 1)
+                    delay = self.ramp * entry.ramp_rank / (total_active - 1)
                     env["_PYTEST_PARALLEL_RAMP_DELAY"] = f"{delay:.6f}"
                 try:
                     term_size = shutil.get_terminal_size()
@@ -1514,6 +1502,11 @@ def _extract_parallel_groups(item: ShardItem) -> list[str]:
 
 def _sigterm_to_keyboard_interrupt(signum: int, frame: Any) -> None:
     raise KeyboardInterrupt
+
+
+def _config_rootpath(config: Any) -> Path:
+    rootpath = getattr(config, "rootpath", None)
+    return rootpath if isinstance(rootpath, Path) else Path.cwd()
 
 
 def _item_file(item: Any, rootpath: Path) -> tuple[Path, str]:

@@ -5,7 +5,7 @@ A pytest plugin that collects in the parent session and assigns whole test files
 ## Development
 
 - `make check` runs Ruff and ty.
-- `make test` runs the test suite serially and in parallel.
+- `make test` runs the test suite under pytest-parallel itself.
 - `make build` builds the wheel.
 - `uv run python benchmarks/run_benchmarks.py` runs the benchmark harness (see [docs/benchmarks.md](docs/benchmarks.md)).
 

@@ -11,7 +11,6 @@ lint:
 	uv run ty check --fix
 
 test:
-	uv run pytest tests/ -q --serial
 	uv run pytest tests/ -q
 
 build:
