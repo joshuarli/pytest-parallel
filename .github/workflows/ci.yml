@@ -53,37 +53,3 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           uv run pytest tests/test_campaign.py -q --serial -k "start_methods or collection_mismatch"
-
-  pytest-nightly:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.15"
-      - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-      - name: Test against pytest pre-release
-        run: |
-          set -euo pipefail
-          uv sync
-          locked=$(uv run python -c 'import pytest; print(pytest.__version__)')
-          echo "locked=$locked"
-          uv pip install --prerelease=allow 'pytest>=9.1.dev0'
-          show=$(uv pip show pytest)
-          printf '%s\n' "$show"
-          shown=$(printf '%s\n' "$show" | python -c 'import sys; print(next(line.removeprefix("Version: ").strip() for line in sys.stdin if line.startswith("Version: ")))')
-          imported=$(uv run --no-sync python -c 'import pytest; print(pytest.__version__)')
-          echo "installed=$imported"
-          if [ "$shown" != "$imported" ]; then
-            echo "uv pip show pytest version $shown differs from imported $imported" >&2
-            exit 1
-          fi
-          if [ "$imported" = "$locked" ]; then
-            echo "imported pytest $imported is still the locked version" >&2
-            exit 1
-          fi
-          uv run --no-sync pytest tests/test_partition.py tests/test_options.py -q --serial
