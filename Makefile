@@ -1,4 +1,4 @@
-.PHONY: build check lint test preflight bump publish
+.PHONY: build check lint test preflight bump publish publish-mypypi
 
 BUMP ?= minor
 
@@ -30,3 +30,18 @@ bump: preflight
 
 publish: bump build
 	vault UV_PUBLISH_USERNAME=__token__ UV_PUBLISH_PASSWORD -- uv publish
+	$(MAKE) publish-mypypi
+
+# Publish to our private wheel index as well. PACKAGES lists top-level
+# requirements; mypypi resolves the transitive closure from PyPI, builds
+# the wheels, and publishes them. Only the host platform is built unless
+# PLATFORM names others (cross-platform builds need matching hosts).
+WORK_DIR ?= .work/registry-pub
+PLATFORM ?=
+BUCKET ?= stuff-mypypi
+PACKAGES ?= joshuarli-pytest-parallel==0.4.0
+publish-mypypi:
+	STUFF_DIR=../stuff \
+	PACKAGES="$(PACKAGES)" \
+	WORK_DIR="$(WORK_DIR)" PLATFORM="$(PLATFORM)" BUCKET="$(BUCKET)" \
+	../stuff/deploy/publish-mypypi.sh
