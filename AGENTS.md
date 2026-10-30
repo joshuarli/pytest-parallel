@@ -27,8 +27,3 @@ A pytest plugin that collects in the parent session and assigns whole test files
 - Stop workers cooperatively on global `-x`/`--maxfail`: touch the stop marker, keep polling during a bounded 5-second drain so in-flight tests finish teardowns and reports, then terminate. Intentionally unexecuted tests are not crash failures. SIGINT/SIGTERM get a short bounded drain, then termination; workers are always reaped and the run directory removed by its owner, the coordinator.
 - Ramping delays only the first test per worker, at most once, after worker collection. The heaviest worker starts first.
 - Keep pytest as the only runtime dependency.
-
-## RFCs
-
-- [docs/rfc/PAR-1-cooperative-worker-shutdown.md](docs/rfc/PAR-1-cooperative-worker-shutdown.md)
-- [docs/rfc/PAR-2-network-guard-local-resolution.md](docs/rfc/PAR-2-network-guard-local-resolution.md)
