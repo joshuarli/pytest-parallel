@@ -7,3 +7,5 @@ build/
 dist/
 .work/
 
+.mypy_cache/
+.tox/
