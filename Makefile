@@ -40,8 +40,10 @@ WORK_DIR ?= .work/registry-pub
 PLATFORM ?=
 BUCKET ?= stuff-mypypi
 PACKAGES ?= joshuarli-pytest-parallel==0.4.0
+STUFF_DIR ?= ../stuff
 publish-mypypi:
-	STUFF_DIR=../stuff \
+	@test -x "$(STUFF_DIR)/deploy/publish-mypypi.sh" || { echo "STUFF_DIR does not point at a stuff checkout: $(STUFF_DIR)" >&2; exit 2; }
+	STUFF_DIR="$(STUFF_DIR)" \
 	PACKAGES="$(PACKAGES)" \
 	WORK_DIR="$(WORK_DIR)" PLATFORM="$(PLATFORM)" BUCKET="$(BUCKET)" \
-	../stuff/deploy/publish-mypypi.sh
+	"$(STUFF_DIR)/deploy/publish-mypypi.sh"
