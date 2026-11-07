@@ -34,16 +34,8 @@ publish: bump build
 
 # Publish to our private wheel index as well. PACKAGES lists top-level
 # requirements; mypypi resolves the transitive closure from PyPI, builds
-# the wheels, and publishes them. Only the host platform is built unless
-# PLATFORM names others (cross-platform builds need matching hosts).
-WORK_DIR ?= .work/registry-pub
-PLATFORM ?=
-BUCKET ?= stuff-mypypi
+# the wheels, and publishes them.
 PACKAGES ?= joshuarli-pytest-parallel==0.4.0
-STUFF_DIR ?= ../stuff
+STUFF ?= stuff
 publish-mypypi:
-	@test -x "$(STUFF_DIR)/deploy/publish-mypypi.sh" || { echo "STUFF_DIR does not point at a stuff checkout: $(STUFF_DIR)" >&2; exit 2; }
-	STUFF_DIR="$(STUFF_DIR)" \
-	PACKAGES="$(PACKAGES)" \
-	WORK_DIR="$(WORK_DIR)" PLATFORM="$(PLATFORM)" BUCKET="$(BUCKET)" \
-	"$(STUFF_DIR)/deploy/publish-mypypi.sh"
+	$(STUFF) publish pypi $(PACKAGES)
