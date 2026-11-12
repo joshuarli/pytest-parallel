@@ -34,7 +34,7 @@ module-name = "pytest_parallel"
 [dependency-groups]
 dev = [
     "ruff==0.17.4",
-    "ty==0.0.99",
+    "ty==0.0.101",
     "uv==0.13.7",
 ]
 
