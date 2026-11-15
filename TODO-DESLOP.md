@@ -40,7 +40,7 @@ Not started.
 
 - **Area:** deslop · tests
 - **Where:** test suites and CI
-- **Problem:** Coverage and mutation results are unmeasured; no deslop mutation lane exists.
+- **Problem:** Coverage and mutation results are unmeasured; no deslop mutation lane exists. Qualification at eda0c359 (macOS, Python 3.15.2): mutmut 3.8.1 full-package recipe exited 1 in 11.77s before classifications; debug rerun exited 1 in 1.73s because pytest-parallel defaults to workers and rejects mutmut’s in-memory StatsCollector execution hooks. Verdict: does not work through pytest-parallel; mutant counts, worker activation, serial alternative cost, and diff-scoped CI timing remain unverified. Mutmut mirrors MUTANT_UNDER_TEST into the environment and uses generated function trampolines, but worker inheritance was not demonstrated. mutmut through pytest-parallel: does not work (in-memory plugin rejected); serial with -p no:pytest_parallel: does not complete here (actual entry-point name no:parallel), counts unavailable, 7.01s (retry 6.90s). Stats collection failed on the known TMPDIR-sensitive test_hooks_weights_groups_and_pin_via_plan after 16 passed; no mutant was classified and the requested killed-mutant fault check could not run.
 - **Recommendation:** Run the deslop Tests step. Accept: no undispositioned survivor in critical code, the test cost budget holds, and the lane is green where the tools are mirrored.
 - **Fix with:** deslop
 - **Effort:** M
