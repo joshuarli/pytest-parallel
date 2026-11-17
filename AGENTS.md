@@ -11,7 +11,7 @@ A pytest plugin that collects in the parent session and assigns whole test files
 
 ## Verification
 
-- `make test` runs the suite; `make lint` runs Ruff and ty. Warm gated runs: 6.13s and 0.74s respectively (macOS, Python 3.15.2); cold cost unmeasured.
+- `make test` runs the suite; `make lint` runs Ruff and ty. Two gated warm test runs took 6.18s and 6.13s; one lint run took 0.74s (macOS, Python 3.15.2). Cold cost is unmeasured.
 - CLI scheduling and usage errors: `tests/test_options.py`; plan JSON v1 and exit behavior: `tests/test_campaign.py::test_json_plan_stdout_is_one_document` and `test_json_plan_collection_error_is_nonzero`.
 - `Shard` and scheduling hooks: `tests/test_campaign.py::test_shard_is_frozen`, `test_hooks_weights_groups_and_pin_via_plan`, and `test_conftest_hooks_stay_inside_their_directory`.
 - JSONL stream validation and reconciliation: `tests/test_p0_correctness.py::test_jsonl_protocol_rejects_truncated_and_malformed_streams` and `test_reconcile_rejects_contradictory_exit_status`.
