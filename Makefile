@@ -51,3 +51,6 @@ coverage:
 	uv run python -c 'import glob, os, pathlib, coverage; d = pathlib.Path(os.environ["COVERAGE_GUARD_DIR"]); pids = [(d / ("worker-" + str(i))).read_text() for i in range(2)]; assert len(set(pids)) == 2; files = [glob.glob(str(d / ("data.*.pid" + pid + ".*"))) for pid in pids]; assert all(len(f) == 1 for f in files), files; data = [coverage.CoverageData(basename=f[0]) for f in files]; [x.read() for x in data]; assert all(any(p.endswith("/pytest_parallel/worker.py") and x.lines(p) for p in x.measured_files()) for x in data), "missing worker measurement"' && \
 	uv run coverage combine && uv run coverage report && \
 	uv run coverage json -o "$$dir/coverage.json"
+
+mutants-scheduling:
+	python3 scripts/mutants_scheduling.py

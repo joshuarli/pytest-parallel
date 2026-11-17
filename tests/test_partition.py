@@ -361,3 +361,126 @@ def test_forwarded_args_uses_invocation_params_and_strips_coordinator_flags(tmp_
     assert "cacheprovider" not in worker_args
     assert "pytest_cacheprovider" not in worker_args
 
+
+
+def test_scheduling_validation_contract():
+    from pytest_parallel.scheduling import validate_group_names, validate_weight
+
+    path = Path('a.py')
+    assert validate_weight(2, path) == 2.0
+    assert validate_weight(0.25, path) == 0.25
+    for invalid in (True, False, 0, -1, float('nan'), float('inf'), '2', None):
+        with pytest.raises(pytest.UsageError):
+            validate_weight(invalid, path)
+    for invalid in (True, 0):
+        with pytest.raises(pytest.UsageError, match=r'a\.py must return a positive finite number'):
+            validate_weight(invalid, path)
+    assert validate_group_names(None, path, 'hook') == []
+    assert validate_group_names([' db ', 'cache'], path, 'hook') == ['db', 'cache']
+    for invalid in ('db', b'db', 1, [' '], [2]):
+        with pytest.raises(pytest.UsageError):
+            validate_group_names(invalid, path, 'hook')
+    with pytest.raises(pytest.UsageError, match=r'hook for a\.py must return a list'):
+        validate_group_names('db', path, 'hook')
+    with pytest.raises(pytest.UsageError, match=r'hook for a\.py requires non-empty string'):
+        validate_group_names([' '], path, 'hook')
+
+
+def test_merged_units_preserve_shard_metadata():
+    files = [
+        FileUnit(Path('a.py'), 'a', [_make_item('a.py::one')], {'db'}, 2.0, 0),
+        FileUnit(Path('b.py'), 'b', [_make_item('b.py::one')], set(), 1.0, 1),
+        FileUnit(Path('c.py'), 'c', [_make_item('c.py::one')], {'db', 'cache'}, 3.0, 2),
+    ]
+    units = merge_units(files)
+    shard = units[0].shard()
+    assert shard.files == (Path('a.py'), Path('c.py'))
+    assert shard.nodeids == ('a.py::one', 'c.py::one')
+    assert shard.weight == 5.0
+    assert shard.groups == ('cache', 'db')
+    assert shard.ordinal == 0
+    assert units[1].files == (Path('b.py'),)
+
+
+def test_count_assignment_honors_pins_and_plan():
+    from pytest_parallel.scheduling import format_plan_text, plan_dict
+
+    root = Path('/project')
+    files = [
+        FileUnit(root / 'a.py', 'a', [_make_item('a.py::one')], {'db'}, 4.0, 0),
+        FileUnit(root / 'b.py', 'b', [_make_item('b.py::one')], set(), 3.0, 1),
+        FileUnit(root / 'c.py', 'c', [_make_item('c.py::one')], set(), 2.0, 2),
+    ]
+    units = merge_units(files)
+    buckets = assign_units(units, 2, pins={1: 0})
+    plan = plan_dict(buckets, units, balance='count', pins={1: 0}, rootpath=root)
+    assert plan == {
+        'version': 1, 'balance': 'count', 'num_workers': 2, 'num_units': 3,
+        'total_weight': 9.0, 'imbalance': 1.0,
+        'workers': [
+            {'worker': 0, 'weight': 5.0, 'test_count': 2, 'file_count': 2, 'files': ['b.py', 'c.py'],
+             'units': [{'files': ['b.py'], 'nodeids': ['b.py::one'], 'test_count': 1, 'weight': 3.0,
+                        'groups': [], 'ordinal': 1, 'pinned': True, 'worker': 0},
+                       {'files': ['c.py'], 'nodeids': ['c.py::one'], 'test_count': 1, 'weight': 2.0,
+                        'groups': [], 'ordinal': 2, 'pinned': False, 'worker': 0}]},
+            {'worker': 1, 'weight': 4.0, 'test_count': 1, 'file_count': 1, 'files': ['a.py'],
+             'units': [{'files': ['a.py'], 'nodeids': ['a.py::one'], 'test_count': 1, 'weight': 4.0,
+                        'groups': ['db'], 'ordinal': 0, 'pinned': False, 'worker': 1}]},
+        ],
+    }
+    assert format_plan_text(plan) == (
+        'pytest-parallel plan: balance=count workers=2 units=3 total_weight=9 imbalance=1\n'
+        'worker 0: 2 tests, 2 files, weight=5\n'
+        '  [pinned] groups=- weight=3 files=b.py\n'
+        '  [auto] groups=- weight=2 files=c.py\n'
+        'worker 1: 1 tests, 1 files, weight=4\n'
+        '  [auto] groups=db weight=4 files=a.py'
+    )
+    assert plan_dict([], [], balance='count', pins={}, rootpath=root) == {
+        'version': 1, 'balance': 'count', 'num_workers': 0, 'num_units': 0,
+        'total_weight': 0.0, 'imbalance': 0.0, 'workers': [],
+    }
+
+
+def test_count_accumulates_loads_for_pinned_and_unpinned_units():
+    files = [
+        FileUnit(Path(f'{name}.py'), name, [_make_item(f'{name}.py::one')], set(), weight, index)
+        for index, (name, weight) in enumerate([('a', 8), ('b', 7), ('c', 6), ('d', 5), ('e', 4), ('f', 3)])
+    ]
+    units = merge_units(files)
+    buckets = assign_units(units, 2)
+    assert [[unit.files for unit in bucket] for bucket in buckets] == [
+        [(Path('a.py'),), (Path('d.py'),), (Path('e.py'),)],
+        [(Path('b.py'),), (Path('c.py'),), (Path('f.py'),)],
+    ]
+    pinned = assign_units(units, 2, pins={0: 0, 1: 0, 2: 1})
+    assert [[unit.files for unit in bucket] for bucket in pinned] == [
+        [(Path('a.py'),), (Path('b.py'),), (Path('f.py'),)],
+        [(Path('c.py'),), (Path('d.py'),), (Path('e.py'),)],
+    ]
+
+
+def test_text_plan_lists_all_groups_and_files():
+    from pytest_parallel.scheduling import format_plan_text
+
+    plan = {'balance': 'count', 'num_workers': 1, 'num_units': 1, 'total_weight': 2, 'imbalance': 0,
+            'workers': [{'worker': 0, 'test_count': 2, 'file_count': 2, 'weight': 2,
+                         'units': [{'pinned': False, 'groups': ['cache', 'db'], 'weight': 2,
+                                    'files': ['a.py', 'b.py']}]}]}
+    assert format_plan_text(plan) == (
+        'pytest-parallel plan: balance=count workers=1 units=1 total_weight=2 imbalance=0\n'
+        'worker 0: 2 tests, 2 files, weight=2\n'
+        '  [auto] groups=cache,db weight=2 files=a.py, b.py'
+    )
+
+
+def test_count_balance_preserves_small_positive_weights():
+    files = [
+        FileUnit(Path(f'{name}.py'), name, [_make_item(f'{name}.py::one')], set(), weight, index)
+        for index, (name, weight) in enumerate([('a', 3e-20), ('b', 2e-20), ('c', 1e-20)])
+    ]
+    buckets = assign_units(merge_units(files), 2)
+    assert [[unit.files for unit in bucket] for bucket in buckets] == [
+        [(Path('a.py'),)],
+        [(Path('b.py'),), (Path('c.py'),)],
+    ]

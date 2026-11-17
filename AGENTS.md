@@ -21,6 +21,7 @@ A pytest plugin that collects in the parent session and assigns whole test files
 
 - Coverage: `make coverage` uses native coverage.py with two workers and checks worker data; `tests/test_coverage.py` proves the installed-wheel worker/branch oracle and negative control. See [coverage evidence](docs/deslop-coverage.md) for settings, tier costs and limitations.
 - Edit: `uv run pytest -p no:parallel tests/test_coverage.py -q`; change and existing CI: `make test` and `make lint`; diagnostic: `make coverage`. Mutation and its CI qualification remain open.
+- Scheduling component mutation: `make mutants-scheduling` requires mutmut 3.8.1 and pytest in its tool environment; see [scenario evidence](docs/deslop-scheduling-tests.md). Broader mutation and CI remain open.
 
 ## Invariants
 
