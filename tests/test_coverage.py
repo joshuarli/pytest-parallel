@@ -24,8 +24,12 @@ def _run(args: list[str], *, cwd: Path, env: dict[str, str]) -> str:
     process = subprocess.Popen(args, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
     try:
         output, _ = process.communicate(timeout=90)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
+    except BaseException:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         process.communicate()
         raise
     assert process.returncode == 0, output

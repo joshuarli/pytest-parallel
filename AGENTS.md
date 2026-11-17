@@ -20,7 +20,7 @@ A pytest plugin that collects in the parent session and assigns whole test files
 - Performance: `benchmarks/run_benchmarks.py` exercises scheduler shapes but is CPU-trivial; a reproducible representative workload is required for runtime changes (see Ground evidence). Consumers: stuff and toolbox; unaffected by this docs-only change, checks not run (toolbox billing excluded).
 
 - Coverage: `make coverage` uses native coverage.py with two workers and checks worker data; `tests/test_coverage.py` proves the installed-wheel worker/branch oracle and negative control. See [coverage evidence](docs/deslop-coverage.md) for settings, tier costs and limitations.
-- Edit: `uv run pytest -p no:parallel tests/test_coverage.py -q`; change: `make coverage` and `make lint`; full: explicitly requested `make test`. Mutation and CI qualification remain open.
+- Edit: `uv run pytest -p no:parallel tests/test_coverage.py -q`; change and existing CI: `make test` and `make lint`; diagnostic: `make coverage`. Mutation and its CI qualification remain open.
 
 ## Invariants
 
