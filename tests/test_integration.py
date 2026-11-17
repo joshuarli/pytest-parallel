@@ -58,12 +58,13 @@ def test_external_hostname_lookup_is_blocked():
         socket.getaddrinfo('example.com', 80)
 
 
-def test_loopback_connection_is_allowed():
+@pytest.mark.parametrize('host', ['127.0.0.1', '', b''])
+def test_loopback_connection_is_allowed(host):
     with socket.socket() as listener:
-        listener.bind(('127.0.0.1', 0))
+        listener.bind((host, 0))
         listener.listen()
         with socket.socket() as client:
-            client.connect(listener.getsockname())
+            client.connect(('127.0.0.1', listener.getsockname()[1]))
             peer, _ = listener.accept()
             with peer:
                 client.sendall(b'ok')
@@ -86,7 +87,7 @@ def test_marker_allows_network():
     )
 
     assert result.returncode == 0, result.stdout
-    assert "4 passed" in result.stdout
+    assert "6 passed" in result.stdout
 
 
 def test_network_blocked_allows_local_bind_and_hostname() -> None:
@@ -287,7 +288,7 @@ def test_network_address_and_resolver_boundary(monkeypatch: pytest.MonkeyPatch) 
             client.settimeout(3)
             for host in ("127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"):
                 client.connect((host, 80))
-            for address in (("192.0.2.1", 80), ("0.0.0.0", 80), (b"\xff", 80)):
+            for address in (("192.0.2.1", 80), ("0.0.0.0", 80), ("", 80), (b"", 80), (b"\xff", 80)):
                 with pytest.raises(PermissionError, match="outside loopback"):
                     client.connect(address)
     assert ("192.0.2.1", 80) not in calls

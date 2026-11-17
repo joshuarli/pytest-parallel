@@ -164,6 +164,8 @@ def _targets_loopback(
     else:
         return False
 
+    if name == "bind" and host in ("", b""):
+        return True
     if name in {"bind", "listen", "accept"} and _is_unspecified_host(host):
         return True
     return _is_loopback_host(host) or _is_local_hostname(host)
