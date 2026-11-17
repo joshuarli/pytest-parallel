@@ -97,6 +97,15 @@ Ruff passed and ty passed. Repeating the installed-wheel selection with
 `or missing_worker_stream` added to the expression exited 0: 23 passed and
 31 deselected. The runtime wheel was unchanged after the earlier build.
 
+Parent suite-cost verification used the same locked environment and source
+imports, `PYTHON_CPU_COUNT=2` (two automatic workers), `cpu-guard --cores 2`,
+and separate valid repo-owned TMPDIRs. The base at `2c69571` passed 130 tests
+in 14.77 s wall; the candidate passed 152 in 15.81 s. Both
+`perf-gate-ready` / `make test` / immediate `perf-gate-ready -1` sequences
+exited 0/0/0, with no post-run hot-process diagnostic. The 1.04 s suite-cost
+increase is within the 30 s allowance. An earlier default-worker-count sample
+with a hot-process diagnostic was discarded. These costs are not a speedup claim.
+
 For the outer deadline, the runner used `subprocess.Popen` with
 `start_new_session=True`, `wait(timeout=1200)`, and on any exception sent
 `SIGKILL` to the process group and called `wait()` before returning. The
