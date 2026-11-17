@@ -1,6 +1,6 @@
 # pytest-parallel
 
-`pytest-parallel` runs pytest suites across fixed worker processes using static whole-file sharding. It requires Python 3.13+ and pytest 9+.
+`pytest-parallel` runs pytest suites across fixed worker processes using static whole-file sharding. It requires Python 3.15+ and pytest 9+.
 
 ## Install
 
@@ -157,7 +157,7 @@ def test_fetch_remote_data():
 
 ## Compatibility
 
-- Supported and CI-tested: Linux and macOS, Python 3.13 and 3.14, pytest 9. Windows is not currently tested or supported.
+- Supported and CI-tested: Linux and macOS, Python 3.15, pytest 9. Windows is not currently tested or supported.
 - Global `-x` and `--maxfail` stop workers cooperatively: no new tests start, in-flight tests finish their fixture teardowns and reports (bounded by a 5s drain, then workers are terminated), and intentionally unexecuted tests are not reported as crashes.
 - Uncaptured output (`-s`, `--capture=no`) is forwarded per test; captured stdout, stderr, and logs are preserved on test reports.
 - Interactive debugging (`--pdb`, `--trace`) requires `--serial`. `--setup-plan` runs through the standard serial runner.
