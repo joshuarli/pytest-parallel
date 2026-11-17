@@ -35,5 +35,5 @@ All runs succeeded (non-zero exits abort the harness). Work is verified by pytes
 - These suites are tiny and CPU-trivial, so fixed worker startup and double collection dominate. Parallel execution is slower than serial here; that is expected and is not evidence about realistic suites with expensive tests.
 - On the uneven suite, count-balanced LPT (0.83s) beat round-robin (1.23s) in this run, consistent with putting the 80-test file on its own worker. Three trials on one loaded developer machine is a directional signal, not a throughput guarantee.
 - Count is a heuristic estimate of cost. It does not promise time-optimal scheduling; use `pytest_parallel_file_weight` when test count is a poor cost predictor.
-- Ramp overhead, start-method comparison (fork vs forkserver vs spawn) and tail latency are measured by the integration tests for correctness; end-to-end start-method timing on Linux CI hardware is future work, as fork is unavailable as a fresh-interpreter default there by design (see README).
+- Integration tests check ramp behavior and start-method correctness; ramp overhead, tail latency and end-to-end start-method timing on Linux CI hardware remain unmeasured. Fork is not the fresh-interpreter default (see README).
 - No claim is made that count balancing improves throughput universally.
