@@ -124,6 +124,10 @@ def pytest_parallel_worker_env(env: dict[str, str], worker_id: int) -> None:
     env["TEST_WORKER_ID"] = str(worker_id)
 ```
 
+## Coverage
+
+Native coverage.py can measure parallel workers with `branch = True`, `parallel = True`, `concurrency = multiprocessing`, `patch = subprocess`, and an absolute `source` and data path in an explicit coverage configuration. Combine data after workers finish. The repository's `make coverage` runs the qualified local setup and checks worker data; see [coverage evidence](docs/deslop-coverage.md) for the exact configuration and limits. This does not claim pytest-cov support.
+
 ## Configure in pytest.ini / pyproject.toml
 
 Use pytest's existing `addopts`; no new configuration language is introduced:
