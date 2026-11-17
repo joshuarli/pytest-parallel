@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -742,3 +743,123 @@ def test_missing_worker_stream_is_reported(tmp_path: Path) -> None:
     assert state.protocol_errors == ["worker 0 result file is missing"]
     coordinator._reconcile_worker(state, items, session, Mock(), None)
     assert session.testsfailed > 0
+
+
+def test_worker_report_observer_preserves_public_serialization_and_phases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "conftest.py").write_text(
+        "import os, pytest\n"
+        "@pytest.hookimpl(tryfirst=True)\n"
+        "def pytest_report_to_serializable(config, report):\n"
+        "    data = report._to_json()\n"
+        "    data['$report_type'] = report.__class__.__name__\n"
+        "    data['serialization_witness'] = os.getpid()\n"
+        "    return data\n"
+    )
+    (tmp_path / "test_reports.py").write_text(
+        "import pytest, warnings\n"
+        "@pytest.fixture\n"
+        "def phases(request):\n"
+        "    print('setup witness')\n"
+        "    request.node.user_properties.append(('case', 'value'))\n"
+        "    yield\n"
+        "    print('teardown witness')\n"
+        "def test_failure(phases):\n"
+        "    print('call witness')\n"
+        "    warnings.warn('report warning witness', UserWarning)\n"
+        "    assert 1 == 2, 'report failure witness'\n"
+        "@pytest.mark.xfail(reason='expected witness')\n"
+        "def test_expected():\n"
+        "    assert False\n"
+    )
+    monkeypatch.delenv("_PYTEST_PARALLEL_WORKER", raising=False)
+    monkeypatch.delenv("PYTEST_PARALLEL_WORKER_ID", raising=False)
+    reports: list[Any] = []
+    warning_messages: list[str] = []
+
+    class Observer:
+        def pytest_runtest_logreport(self, report: Any) -> None:
+            reports.append(report)
+
+        def pytest_warning_recorded(self, warning_message: Any, when: str) -> None:
+            if when == "runtest":
+                warning_messages.append(str(warning_message.message))
+
+    rc = pytest.main([str(tmp_path), "-j", "1", "-q", "--import-mode=importlib"], plugins=[Observer()])
+    output = capsys.readouterr().out
+    assert rc == pytest.ExitCode.TESTS_FAILED, output
+    failure = [r for r in reports if r.nodeid.endswith("::test_failure")]
+    assert [(r.when, r.outcome) for r in failure] == [("setup", "passed"), ("call", "failed"), ("teardown", "passed")]
+    assert all(r.serialization_witness != os.getpid() for r in failure)
+    assert all(("case", "value") in r.user_properties for r in failure)
+    assert "report failure witness" in str(failure[1].longrepr)
+    assert "setup witness" in failure[0].capstdout
+    assert "call witness" in failure[1].capstdout
+    assert "teardown witness" in failure[2].capstdout
+    expected = [r for r in reports if r.nodeid.endswith("::test_expected") and r.when == "call"]
+    assert len(expected) == 1
+    assert expected[0].outcome == "skipped"
+    assert expected[0].wasxfail == "expected witness"
+    assert "report warning witness" in warning_messages
+
+
+def test_worker_report_observer_jsonl_from_pytest_hooks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from pytest_parallel.worker import ResultReporter
+
+    stream = tmp_path / "events.jsonl"
+    (tmp_path / "conftest.py").write_text(
+        "import pytest\n"
+        "@pytest.hookimpl(tryfirst=True)\n"
+        "def pytest_report_to_serializable(config, report):\n"
+        "    assert config.rootpath is not None\n"
+        "    if report.nodeid.endswith('::test_bad'):\n"
+        "        data = report._to_json()\n"
+        "        data['$report_type'] = report.__class__.__name__\n"
+        "        data['custom_witness'] = 'from public hook'\n"
+        "        return data\n"
+        "    if report.nodeid.endswith('::test_xfail'):\n"
+        "        return 'unsupported result'\n"
+    )
+    suite = tmp_path / "test_direct.py"
+    suite.write_text(
+        "import pytest\n"
+        "def test_bad():\n    print('captured witness')\n    assert False, 'failure witness'\n"
+        "@pytest.mark.xfail(reason='xfail witness')\n"
+        "def test_xfail():\n    assert False\n"
+    )
+    rc = pytest.main([str(suite), "-p", "no:parallel", "-q", "--import-mode=importlib"], plugins=[ResultReporter(str(stream))])
+    capsys.readouterr()
+    assert rc == pytest.ExitCode.TESTS_FAILED
+    events = [json.loads(line) for line in stream.read_text().splitlines()]
+    reports = [e for e in events if e["type"] == "report" and e["nodeid"].endswith("::test_bad")]
+    assert [(e["when"], e["outcome"]) for e in reports] == [("setup", "passed"), ("call", "failed"), ("teardown", "passed")]
+    call = reports[1]
+    assert call["duration"] >= 0
+    assert "failure witness" in call["longrepr"]
+    assert call["report"]["$report_type"] == "TestReport"
+    assert call["report"]["custom_witness"] == "from public hook"
+    assert reports[0]["longrepr"] is None
+    assert any("captured witness" in section[1] for section in call["report"]["sections"])
+    xfail = [e for e in events if e["type"] == "report" and e["nodeid"].endswith("::test_xfail") and e["when"] == "call"]
+    assert len(xfail) == 1
+    assert xfail[0]["outcome"] == "skipped"
+    assert xfail[0]["wasxfail"] == "xfail witness"
+    assert xfail[0]["report"]["$report_type"] == "TestReport"
+    assert not [e for e in events if e["type"] == "collect_report"]
+
+    bad = tmp_path / "test_collect_error.py"
+    bad.write_text("raise RuntimeError('collection witness')\n")
+    stream.unlink()
+    rc = pytest.main([str(bad), "-p", "no:parallel", "-q", "--import-mode=importlib"], plugins=[ResultReporter(str(stream))])
+    capsys.readouterr()
+    assert rc == pytest.ExitCode.INTERRUPTED
+    events = [json.loads(line) for line in stream.read_text().splitlines()]
+    errors = [e for e in events if e["type"] == "collect_report"]
+    assert len(errors) == 1
+    assert errors[0]["nodeid"].endswith("test_collect_error.py")
+    assert errors[0]["outcome"] == "failed"
+    assert "collection witness" in errors[0]["longrepr"]
+    assert errors[0]["report"]["$report_type"] == "CollectReport"
