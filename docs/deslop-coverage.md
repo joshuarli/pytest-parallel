@@ -1,6 +1,6 @@
 # Coverage prerequisite evidence
 
-Scope: base `85ef2ff7303da5af52d97fa1ecefb02fb123ec4b`, macOS arm64, CPython 3.15.2, uv 0.13.7, pytest 9.2.0, coverage.py 7.17.3 (C extension). The stuff index `/current/simple/coverage/` served the pinned cp315 macOS and Linux wheels; `uv.lock` records their hashes. Only coverage was added to dev dependencies. The built wheel before and after was 30,994 bytes, with identical member names and `Requires-Dist: pytest>=9.0`; runtime code and dependencies did not change. Builds: `uv build --wheel --out-dir .work/wheel-before` and `uv build --wheel --out-dir .work/wheel-after`, both exit 0. Installation/build elapsed cost was not measured.
+Scope: base `85ef2ff7303da5af52d97fa1ecefb02fb123ec4b`, macOS arm64, CPython 3.15.2, uv 0.13.7, pytest 9.2.0, coverage.py 7.17.3 (C extension). The stuff index `/current/simple/coverage/` served the pinned cp315 macOS and Linux wheels; `uv.lock` records their hashes. Only coverage was added to dev dependencies. Initial before/after wheels were both 30,994 bytes, but that comparison preceded the README update. Rebuilding final `eb2aa8e` gives 31,199 bytes: 205 additional bytes from the coverage README embedded in wheel metadata. Extracted runtime package files compare byte-for-byte identical, and `Requires-Dist` remains only `pytest>=9.0`. The earlier claim that final wheel bytes were identical was too broad. Initial `uv build --wheel --out-dir .work/wheel-before` and `wheel-after`, and final `uv build --wheel --out-dir .work/wheel-final`, all exit 0; final wheel SHA-256 is `21c633674796f647d039c924627986cd23826269956308e17d5632d841ccf74c`. Installation/build elapsed cost was not measured.
 
 Test-pyramid audit: edit gate `uv run pytest -p no:parallel tests/test_coverage.py -q` exercises the installed-wheel witness. Change gates and existing CI run `make test`, `make lint`; `make coverage` is a diagnostic that instruments the full suite. The existing boundary map and 119-test costs are in [Ground](deslop-ground.md) and AGENTS.md. Unit/component checks cover scheduling and protocol validation; subprocess integration checks cover collection, process cleanup, CLI and network behavior. Coverage can falsely pass through controller imports, stale files, omitted unimported modules, missing worker data, or an empty selection. The witness and fresh target data address those cases within this scope; coverage alone does not establish assertion quality. No tests were removed; a broader per-test audit and mutation remain open.
 
@@ -29,6 +29,67 @@ Parent acceptance removes the campaign host's absolute lock path and CPU-guard d
 The parent also reran the ordinary final `make test` with the same pre/time/post
 sequence: all three exit 0, 120 passed, zero skips, 6.42s wall. This is within
 the suite-cost allowance against the 7.46s baseline observation; it is not a
-measured speedup. Runtime wheel bytes remain identical, so existing consumers'
-runtime behavior is unaffected. Real-consumer coverage qualification remains
-separate from the installed-wheel fixture.
+measured speedup. Runtime package files remain identical; README metadata
+accounts for the 205-byte wheel increase. Real-consumer coverage qualification
+is recorded separately below.
+
+## Repomod consumer qualification
+
+Stuff `abc52740a3e6872c48b919b610f8d83f73b41b4c`, component `repomod/`,
+passes with the candidate runtime installed into a fresh isolated environment:
+1,410 tests passed, three skipped. Both consumer workers have distinct PID
+markers and separate raw data containing executed `repomod` lines before
+combination. Package-wide totals are 22,010/25,735 lines and 8,043/10,612
+branches. Live-fleet and launcher flags were disabled. This is a correctness
+qualification; the reported pytest duration is not a gated performance result.
+
+The installed artifact was the earlier 30,994-byte wheel; the complete package
+directory was subsequently compared against final `eb2aa8e` and is identical.
+Its loaded module path was the consumer's isolated environment, and installed
+`coordinator.py` SHA-256 was
+`928f23e3c1e67c3b3dfe54fcca562b28d1bdcc0dca2947dfef53e441f3939ed5`.
+No consumer manifest, lockfile, fleet checkout or deployment changed.
+
+To reproduce, build this project's wheel, create a clean isolated Stuff
+worktree at the revision above, run `uv sync --locked` there, then install the
+wheel with `uv pip install --python ENV/bin/python --no-deps --reinstall WHEEL`
+and coverage 7.17.3 from the stuff index. Use an explicit absolute configuration
+as above with `source = CONSUMER/repomod` and a fresh data directory. Run
+`ENV/bin/python -m coverage run -m pytest tests/repomod -q -j 2` under the
+two-core guard and campaign coverage lock, with the optional fleet/launcher
+environment flags unset. A session-finish test plugin writes each worker PID
+only when `Coverage.current()` exists; before combining, read the corresponding
+raw files through `CoverageData` and require nonempty `repomod` measurements
+from both. The installed-wheel fixture above supplies the independent
+worker-only branch and missing-measurement negative controls. Combine only
+after pytest exits and export the JSON totals. Toolbox remains excluded by
+the campaign's billing decision; no toolbox consumer claim is made.
+
+For the worker guard, save the following as the consumer's
+`.work/tmp/consumer_cov_guard.py`, set `COVERAGE_GUARD_DIR` to the fresh data
+directory, and put `.work/tmp` on `PYTHONPATH`. Register it with
+`-p consumer_cov_guard` during pytest, then run the same file with the isolated
+Python before `coverage combine`. The configured `data_file` is `DIR/data`.
+
+```python
+import os
+from pathlib import Path
+import coverage
+
+def pytest_sessionfinish():
+    worker = os.environ.get("PYTEST_PARALLEL_WORKER_ID")
+    if worker is not None:
+        assert coverage.Coverage.current() is not None
+        Path(os.environ["COVERAGE_GUARD_DIR"], "worker-" + worker).write_text(str(os.getpid()))
+
+if __name__ == "__main__":
+    root = Path(os.environ["COVERAGE_GUARD_DIR"])
+    pids = [(root / ("worker-" + str(i))).read_text() for i in range(2)]
+    assert len(set(pids)) == 2
+    for pid in pids:
+        files = list(root.glob("data.*.pid" + pid + ".*"))
+        assert len(files) == 1
+        data = coverage.CoverageData(basename=str(files[0]))
+        data.read()
+        assert any("/repomod/" in path and data.lines(path) for path in data.measured_files())
+```
