@@ -7,6 +7,8 @@ Ground evidence at 4968f8e: the plan fixture has a local pytest.ini; PR 15 CI pa
 
 ## Report
 
+Scheduling scenario: serial mutmut 3.8.1 selected 276 identities, with 264 killed, 11 equivalent survivors and one confirmed timeout; mutated-module activation and the negative control are recorded in [scheduling evidence](docs/deslop-scheduling-tests.md). DSLP-4, the broader Tests audit and whole-change CI remain open.
+
 Coverage prerequisite at `85ef2ff`: native coverage.py measured both worker-only branch outcomes in an installed-wheel witness; the negative control removed worker measurements and failed its oracle. Package-wide coverage and the test-pyramid audit are in [coverage evidence](docs/deslop-coverage.md). Actual pre/test/post gates all exit 0; individual warm observations are 7.46s before and 7.53s after. Parent's portable target and cleanup correction pass all 120 instrumented tests and lint, with 1484/1760 lines and 554/716 branches covered. Mutation, decision dispositions, CI and other platforms remain open; DSLP-4 is not complete.
 
 Diagnose at `0ecb2b3`: reviewed first-party Python, tests, manifests, CI/release configuration, docs, both backlogs and recent churn. Lenses covered public hooks and CLI, scheduling, errors, worker lifecycle and JSONL reconciliation, argument/environment forwarding, network guard, tests, dependencies and documentation. One P2 finding (DSLP-6); no P1, P3 or P4 findings. Built-wheel synthetic hook probes reproduced the finding; baseline Ruff and ty passed. Linux, Windows, consumer integration, live release/registry paths, broader plugin combinations, performance, coverage and mutation were not exercised; coverage and the in-memory plugin limitation remain DSLP-4. No runtime, consumer or performance claim follows from this docs-only pass. Types is recorded below; DSLP-4 Tests is next, with DSLP-6 deferred to Findings.
@@ -42,8 +44,8 @@ The manifest and lockfile pin the same tools; no prior scratch file is needed.
 
 - **Area:** deslop · tests
 - **Where:** test suites and CI
-- **Problem:** Native coverage.py 7.17.3 measures worker execution with multiprocessing, parallel and subprocess settings; the installed-wheel witness and package-wide baseline are documented in docs/deslop-coverage.md. Broader decision gaps, mutation and a qualified CI lane remain unmeasured. Mutmut 3.8.1 rejected its in-memory StatsCollector through pytest-parallel; the attempted serial route failed before the TMPDIR-sensitive fixture was repaired. No mutant was classified; the corrected serial route still needs qualification.
-- **Recommendation:** Run the deslop Tests step. Accept: no undispositioned survivor in critical code, the test cost budget holds, and the lane is green where the tools are mirrored.
+- **Problem:** Native worker coverage is established in docs/deslop-coverage.md. The complete scheduling component now has a serial mutmut scenario with activation and survivor dispositions in docs/deslop-scheduling-tests.md. The broader test audit, other components, and whole-change CI qualification remain open.
+- **Recommendation:** Complete the broader Tests step and qualify a classified whole-change CI lane; keep scheduling results scoped to their recorded source.
 - **Fix with:** deslop
 - **Effort:** M
 
