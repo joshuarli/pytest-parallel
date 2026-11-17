@@ -11,13 +11,13 @@ A pytest plugin that collects in the parent session and assigns whole test files
 
 ## Verification
 
-- `make test` runs the suite; `make lint` runs Ruff and ty. Two gated warm test runs took 6.18s and 6.13s; one lint run took 0.74s (macOS, Python 3.15.2). Cold cost is unmeasured.
+- `make test` runs the suite; `make lint` runs Ruff and ty. Cold and warm test runs took 7.50s and 7.48s; lint took 1.18s (macOS, Python 3.15.2); see [Ground evidence](docs/deslop-ground.md) for gates, setup, and limitations.
 - CLI scheduling and usage errors: `tests/test_options.py`; plan JSON v1 and exit behavior: `tests/test_campaign.py::test_json_plan_stdout_is_one_document` and `test_json_plan_collection_error_is_nonzero`.
 - `Shard` and scheduling hooks: `tests/test_campaign.py::test_shard_is_frozen`, `test_hooks_weights_groups_and_pin_via_plan`, and `test_conftest_hooks_stay_inside_their_directory`.
 - JSONL stream validation and reconciliation: `tests/test_p0_correctness.py::test_jsonl_protocol_rejects_truncated_and_malformed_streams` and `test_reconcile_rejects_contradictory_exit_status`.
 - Worker processes, recollection, and cleanup: `tests/test_campaign.py::test_start_methods_smoke`, `test_collection_mismatch_spawn_and_forkserver`, and `tests/test_backlog.py::test_sigterm_reaps_worker_and_removes_work_dir`.
 - Network isolation and exceptions: `tests/test_integration.py::test_network_policy_and_loopback_exception`, `test_marker_allows_network`, and `test_serial_network_is_not_guarded`.
-- Performance workload: `benchmarks/run_benchmarks.py`; workload gate and costs remain unmeasured. Library consumers: stuff and toolbox; consumer checks remain unverified.
+- Performance: `benchmarks/run_benchmarks.py` exercises scheduler shapes but is CPU-trivial; a reproducible representative workload is required for runtime changes (see Ground evidence). Consumers: stuff and toolbox; unaffected by this docs-only change, checks not run (toolbox billing excluded).
 
 ## Invariants
 
