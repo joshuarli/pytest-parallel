@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -258,3 +259,136 @@ def test_warnings_forwarded_without_duplicating_collection_warnings(tmp_path: Pa
     assert "runtime_warning_beta" in result.stdout
     assert result.stdout.count("UserWarning: collection_time_warning_once") == 1
     assert "2 passed, 3 warnings" in result.stdout
+
+
+def test_network_address_and_resolver_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    import socket
+
+    from pytest_parallel.network import network_blocked
+
+    calls: list[object] = []
+
+    def fake_lookup(host: object, *args: object, **kwargs: object) -> str:
+        calls.append(host)
+        return "resolved"
+
+    def fake_connect(sock: socket.socket, address: object) -> None:
+        calls.append(address)
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_lookup)
+    monkeypatch.setattr(socket.socket, "connect", fake_connect)
+    with network_blocked():
+        for host in (None, "", b"", "localhost", "LOCALHOST.", b"127.0.0.1", "::1", "::ffff:127.0.0.1", "0.0.0.0", socket.gethostname()):
+            assert socket.getaddrinfo(host, 80) == "resolved", repr(host)
+        for host in ("192.0.2.1", "example.invalid", b"\xff"):
+            with pytest.raises(PermissionError, match="outside loopback"):
+                socket.getaddrinfo(host, 80)
+        with socket.socket() as client:
+            client.settimeout(3)
+            for host in ("127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"):
+                client.connect((host, 80))
+            for address in (("192.0.2.1", 80), ("0.0.0.0", 80), (b"\xff", 80)):
+                with pytest.raises(PermissionError, match="outside loopback"):
+                    client.connect(address)
+    assert ("192.0.2.1", 80) not in calls
+    assert "192.0.2.1" not in calls
+    assert socket.getaddrinfo is fake_lookup
+    assert socket.socket.connect is fake_connect
+
+
+def test_network_guard_installed_wheel_spawn(tmp_path: Path) -> None:
+    repo = Path(__file__).resolve().parents[1]
+    env = _clean_env()
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTEST_ADDOPTS", None)
+    def run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        process = subprocess.Popen(args, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            output, _ = process.communicate(timeout=90)
+        except BaseException:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            raise
+        return subprocess.CompletedProcess(args, process.returncode, output)
+
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    build = run(["uv", "build", "--wheel", "--out-dir", str(wheels)], cwd=repo)
+    assert build.returncode == 0, build.stdout
+    (wheel,) = wheels.glob("*.whl")
+    installed = tmp_path / "installed"
+    install = run(["uv", "pip", "install", "--no-deps", "--target", str(installed), str(wheel)], cwd=tmp_path)
+    assert install.returncode == 0, install.stdout
+    env["PYTHONPATH"] = str(installed)
+    env["WHEEL_TARGET"] = str(installed)
+    (tmp_path / "test_worker_network.py").write_text('''
+import os, socket
+from pathlib import Path
+import pytest
+import pytest_parallel
+assert Path(pytest_parallel.__file__).resolve().is_relative_to(Path(os.environ["WHEEL_TARGET"]))
+real_connect = socket.socket.connect
+calls = []
+def connect(sock, address):
+    calls.append(address)
+    if isinstance(address, str) or address[0] == "127.0.0.1":
+        return real_connect(sock, address)
+    raise AssertionError("external transport reached")
+def lookup(host, *args, **kwargs):
+    calls.append(host)
+    return "fake result"
+socket.socket.connect = connect
+socket.getaddrinfo = lookup
+
+def test_boundary(tmp_path, monkeypatch):
+    assert os.environ.get("_PYTEST_PARALLEL_WORKER") == "1"
+    with socket.socket() as listener:
+        listener.settimeout(3)
+        listener.bind(("127.0.0.1", 0)); listener.listen()
+        with socket.socket() as client:
+            client.settimeout(3)
+            client.connect(listener.getsockname())
+            peer, _ = listener.accept()
+            with peer:
+                peer.settimeout(3)
+                client.sendall(b"ok")
+                assert peer.recv(2) == b"ok"
+    if hasattr(socket, "AF_UNIX"):
+        monkeypatch.chdir(tmp_path)
+        address = "s"
+        try:
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.settimeout(3)
+                listener.bind(address); listener.listen()
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.settimeout(3)
+                    client.connect(address)
+                    peer, _ = listener.accept()
+                    with peer:
+                        peer.settimeout(3)
+                        client.sendall(b"u")
+                        assert peer.recv(1) == b"u"
+        finally:
+            if os.path.exists(address):
+                os.unlink(address)
+    with socket.socket() as client:
+        client.settimeout(3)
+        with pytest.raises(PermissionError, match="outside loopback"):
+            client.connect(("192.0.2.1", 80))
+    assert ("192.0.2.1", 80) not in calls
+    assert socket.getaddrinfo("localhost", 80) == "fake result"
+    with pytest.raises(PermissionError, match="outside loopback"):
+        socket.getaddrinfo("example.invalid", 80)
+    assert "example.invalid" not in calls
+
+@pytest.mark.enable_network
+def test_restored():
+    assert socket.socket.connect is connect
+    assert socket.getaddrinfo is lookup
+''')
+    result = run([sys.executable, "-m", "pytest", "-q", "-j", "1", "--parallel-start-method=spawn"], cwd=tmp_path)
+    assert result.returncode == 0, result.stdout
+    assert "2 passed" in result.stdout
