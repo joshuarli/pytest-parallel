@@ -1,5 +1,9 @@
 # Network guard boundary witnesses
 
+After integration with the worker-report assertions on current main, the
+parent reran `make test` and `make lint` in the same frozen environment.
+All 156 tests, Ruff and ty passed. Runtime source remained unchanged.
+
 Base `e49e7fb1080a8766c28c2257b8261966aef8dcd0`, macOS, CPython 3.15.2. The runtime source was unchanged. `test_network_address_and_resolver_boundary` exercises allowed and denied host forms with fake resolver and transport and verifies restoration. `test_network_guard_installed_wheel_spawn` builds and installs the wheel, asserts the spawned worker imports it, exchanges data over owned loopback and Unix sockets, and checks denial of TEST-NET and a fake hostname before their fake transport and resolver. The child processes have 90-second deadlines and process-group cleanup; sockets have three-second timeouts. No third-party endpoint is contacted.
 
 The contract mismatch remains open for a separate runtime fix: `uv run python -c 'import socket; from pytest_parallel.network import network_blocked; s=socket.socket(); exec("with network_blocked(): s.bind((\"\", 0))")'` exits 1 with `PermissionError`; AGENTS.md allows the empty local bind address. No consumer or performance claim is made here. Broader Tests and CI remain open.
