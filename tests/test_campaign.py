@@ -7,7 +7,6 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
@@ -116,8 +115,8 @@ def test_hooks_weights_groups_and_pin_via_plan(tmp_path: Path) -> None:
 def test_missing_hooks_use_defaults(tmp_path: Path) -> None:
     from pytest_parallel.coordinator import Coordinator
 
-    config = SimpleNamespace(rootpath=tmp_path, hook=SimpleNamespace())
-    coordinator = Coordinator(cast(Any, config), 2)
+    config = Mock(spec=pytest.Config, rootpath=tmp_path, hook=SimpleNamespace())
+    coordinator = Coordinator(config, 2)
     units = coordinator._build_units([_item("test_a.py::test_a"), _item("test_b.py::test_b")])
     assert [unit.weight for unit in units] == [1.0, 1.0]
     assert [unit.groups for unit in units] == [(), ()]
