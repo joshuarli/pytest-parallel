@@ -552,3 +552,193 @@ def test_keyboard_interrupt_terminates_workers_and_writes_stop_file(tmp_path: Pa
     assert (tmp_path / "stop").exists()
     state.process.terminate.assert_called()
 
+
+
+@pytest.mark.parametrize(
+    ("suffix", "diagnostic"),
+    [
+        (b"", None),
+        (b"not-json\n", "malformed JSON"),
+        (b"[]\n", "non-object JSON event from worker 0: list"),
+        (b"\n", "empty JSONL line"),
+        (b'{"v":1', "truncated JSONL"),
+        (b"\xff", "truncated JSONL"),
+        (b'{"v":2,"type":"warning"}\n', "unsupported protocol version"),
+        (b'{"v":1,"type":"unknown"}\n', "event 'unknown' received after session_finish"),
+    ],
+)
+def test_real_worker_stream_final_read_rejects_corruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    suffix: bytes, diagnostic: str | None,
+) -> None:
+    test_file = tmp_path / "test_real_worker.py"
+    test_file.write_text("def test_ok():\n    assert True\n")
+    monkeypatch.delenv("_PYTEST_PARALLEL_WORKER", raising=False)
+    monkeypatch.delenv("PYTEST_PARALLEL_WORKER_ID", raising=False)
+    original = Coordinator._read_worker_events
+    injected = False
+
+    def read(self: Any, state: Any, items: Any, session: Any, terminal: Any, *, final: bool) -> None:
+        nonlocal injected
+        if final:
+            assert not state.process.is_alive()
+            with state.result_path.open("ab") as stream:
+                stream.write(suffix)
+            injected = True
+        original(self, state, items, session, terminal, final=final)
+
+    monkeypatch.setattr(Coordinator, "_read_worker_events", read)
+    rc = pytest.main([str(test_file), "-j", "1", "-q", "--import-mode=importlib"])
+    output = capsys.readouterr().out
+    assert injected, output
+    if diagnostic is None:
+        assert rc == pytest.ExitCode.OK, output
+        assert "1 passed" in output
+    else:
+        assert rc == pytest.ExitCode.TESTS_FAILED, output
+        assert diagnostic in output
+
+
+def test_real_worker_invalid_utf8_inside_json_event_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    test_file = tmp_path / "test_real_worker.py"
+    test_file.write_text("def test_ok():\n    assert True\n")
+    monkeypatch.delenv("_PYTEST_PARALLEL_WORKER", raising=False)
+    monkeypatch.delenv("PYTEST_PARALLEL_WORKER_ID", raising=False)
+    original = Coordinator._read_worker_events
+
+    def read(self: Any, state: Any, items: Any, session: Any, terminal: Any, *, final: bool) -> None:
+        if final:
+            assert not state.process.is_alive()
+            data = state.result_path.read_bytes()
+            assert data.startswith(b"{")
+            state.result_path.write_bytes(b'{"extra":"\xff",' + data[1:])
+            original(self, state, items, session, terminal, final=True)
+
+    monkeypatch.setattr(Coordinator, "_read_worker_events", read)
+    rc = pytest.main([str(test_file), "-j", "1", "-q", "--import-mode=importlib"])
+    output = capsys.readouterr().out
+    assert rc == pytest.ExitCode.TESTS_FAILED, output
+    assert "invalid UTF-8" in output
+
+
+@pytest.mark.parametrize(
+    ("injected", "diagnostic"),
+    [
+        (b"not-json\n", "malformed JSON"),
+        (b"\xff\n", "invalid UTF-8"),
+        (b"\n", "empty JSONL line"),
+        (b"[]\n", "non-object JSON"),
+        (b'{"v":1,"type":"warning"}\n', "invalid warning event"),
+        (b'{"v":1,"type":"unknown"}\n', "unknown event type"),
+        (b'{"v":1,"type":"internal_error","excrepr":"injected fault"}\n', "injected fault"),
+        (b'{"v":1,"type":"internal_error"}\n', "worker 0 internal error: worker internal error"),
+    ],
+)
+def test_real_worker_stream_interleaved_errors_preserve_later_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    injected: bytes, diagnostic: str,
+) -> None:
+    test_file = tmp_path / "test_interleaved_worker.py"
+    test_file.write_text("def test_ok():\n    assert True\n")
+    monkeypatch.delenv("_PYTEST_PARALLEL_WORKER", raising=False)
+    monkeypatch.delenv("PYTEST_PARALLEL_WORKER_ID", raising=False)
+    original = Coordinator._read_worker_events
+
+    def read(self: Any, state: Any, items: Any, session: Any, terminal: Any, *, final: bool) -> None:
+        if final:
+            data = state.result_path.read_bytes()
+            first, rest = data.split(b"\n", 1)
+            state.result_path.write_bytes(first + b"\n" + injected + rest)
+            original(self, state, items, session, terminal, final=True)
+
+    reports: list[tuple[str, str]] = []
+
+    class Observer:
+        def pytest_runtest_logreport(self, report: Any) -> None:
+            reports.append((report.when, report.outcome))
+
+    monkeypatch.setattr(Coordinator, "_read_worker_events", read)
+    rc = pytest.main([str(test_file), "-j", "1", "-q", "--import-mode=importlib"], plugins=[Observer()])
+    output = capsys.readouterr().out
+    assert rc == pytest.ExitCode.TESTS_FAILED, output
+    assert diagnostic in output
+    assert ("call", "passed") in reports
+
+
+def test_real_worker_stream_replays_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    test_file = tmp_path / "test_worker_warning.py"
+    test_file.write_text("import warnings\ndef test_ok():\n    warnings.warn('worker warning witness', UserWarning)\n")
+    monkeypatch.delenv("_PYTEST_PARALLEL_WORKER", raising=False)
+    monkeypatch.delenv("PYTEST_PARALLEL_WORKER_ID", raising=False)
+    rc = pytest.main([str(test_file), "-j", "1", "-q", "--import-mode=importlib"])
+    output = capsys.readouterr().out
+    assert rc == pytest.ExitCode.OK, output
+    assert "worker warning witness" in output
+    assert "1 passed" in output
+
+
+def test_real_worker_stream_replays_collection_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    test_file = tmp_path / "test_worker_collect.py"
+    test_file.write_text(
+        "import os\n"
+        "if os.getenv('_PYTEST_PARALLEL_WORKER'):\n    raise RuntimeError('worker collection witness')\n"
+        "def test_ok():\n    assert True\n"
+    )
+    monkeypatch.delenv("_PYTEST_PARALLEL_WORKER", raising=False)
+    monkeypatch.delenv("PYTEST_PARALLEL_WORKER_ID", raising=False)
+    reports: list[str] = []
+
+    class Observer:
+        def pytest_collectreport(self, report: Any) -> None:
+            if report.failed:
+                reports.append(str(report.longrepr))
+
+    rc = pytest.main([str(test_file), "-j", "1", "-q", "--import-mode=importlib"], plugins=[Observer()])
+    output = capsys.readouterr().out
+    assert rc == pytest.ExitCode.TESTS_FAILED, output
+    assert any("worker collection witness" in report for report in reports), output
+
+
+def test_complete_events_before_partial_line_are_not_replayed(tmp_path: Path) -> None:
+    coordinator, state, session, items = _make_harness(tmp_path, ["a.py::test_1"])
+    first = b'{"v":1,"type":"collection","nodeids":["a.py::test_1"]}\n'
+    state.result_path.write_bytes(first + b'{"v":1,"type":"test_start",')
+    coordinator._read_worker_events(state, items, session, Mock(), final=False)
+    assert state.collection_verified
+    assert state.offset == len(first)
+    with state.result_path.open("ab") as stream:
+        stream.write(b'"nodeid":"a.py::test_1"}\n')
+    coordinator._read_worker_events(state, items, session, Mock(), final=False)
+    assert state.current_test is not None
+    assert state.current_test.nodeid == "a.py::test_1"
+    assert not state.protocol_errors
+    assert state.offset == state.result_path.stat().st_size
+
+
+def test_real_worker_stream_forwards_uncaptured_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    test_file = tmp_path / "test_worker_stdout.py"
+    test_file.write_text("def test_ok():\n    print('worker stdout witness')\n")
+    monkeypatch.delenv("_PYTEST_PARALLEL_WORKER", raising=False)
+    monkeypatch.delenv("PYTEST_PARALLEL_WORKER_ID", raising=False)
+    rc = pytest.main([str(test_file), "-j", "1", "-q", "-s", "--import-mode=importlib"])
+    output = capsys.readouterr().out
+    assert rc == pytest.ExitCode.OK, output
+    assert "worker stdout witness" in output
+    assert "1 passed" in output
+
+
+def test_missing_worker_stream_is_reported(tmp_path: Path) -> None:
+    coordinator, state, session, items = _make_harness(tmp_path, ["a.py::test_1"])
+    state.result_path.unlink()
+    coordinator._read_worker_events(state, items, session, Mock(), final=True)
+    assert state.protocol_errors == ["worker 0 result file is missing"]
+    coordinator._reconcile_worker(state, items, session, Mock(), None)
+    assert session.testsfailed > 0

@@ -7,6 +7,8 @@ Ground evidence at 4968f8e: the plan fixture has a local pytest.ini; PR 15 CI pa
 
 ## Report
 
+Event-stream scenario: bounded coordinator intake and dispatch mutation, real-worker stream witnesses, and the invalid UTF-8 fix are recorded in [event-stream evidence](docs/deslop-event-stream.md). Broader DSLP-4 remains open.
+
 Scheduling scenario: serial mutmut 3.8.1 selected 276 identities, with 264 killed, 11 equivalent survivors and one confirmed timeout; mutated-module activation and the negative control are recorded in [scheduling evidence](docs/deslop-scheduling-tests.md). DSLP-4, the broader Tests audit and whole-change CI remain open.
 
 Coverage prerequisite at `85ef2ff`: native coverage.py measured both worker-only branch outcomes in an installed-wheel witness; the negative control removed worker measurements and failed its oracle. Package-wide coverage and the test-pyramid audit are in [coverage evidence](docs/deslop-coverage.md). Actual pre/test/post gates all exit 0; individual warm observations are 7.46s before and 7.53s after. Parent's portable target and cleanup correction pass all 120 instrumented tests and lint, with 1484/1760 lines and 554/716 branches covered. Mutation, decision dispositions, CI and other platforms remain open; DSLP-4 is not complete.
