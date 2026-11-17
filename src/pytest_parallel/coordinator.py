@@ -780,7 +780,11 @@ class Coordinator:
                     )
                 break
             consumed_bytes += len(raw_bytes)
-            line_text = raw_bytes.decode("utf-8", errors="replace").strip()
+            try:
+                line_text = raw_bytes.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                state.protocol_errors.append(f"invalid UTF-8 JSONL event from worker {state.worker_id}")
+                continue
             if not line_text:
                 state.protocol_errors.append(f"empty JSONL line from worker {state.worker_id}")
                 continue

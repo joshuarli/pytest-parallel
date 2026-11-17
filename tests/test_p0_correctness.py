@@ -552,3 +552,71 @@ def test_keyboard_interrupt_terminates_workers_and_writes_stop_file(tmp_path: Pa
     assert (tmp_path / "stop").exists()
     state.process.terminate.assert_called()
 
+
+
+@pytest.mark.parametrize(
+    ("suffix", "diagnostic"),
+    [
+        (b"", None),
+        (b"not-json\n", "malformed JSON"),
+        (b"[]\n", "non-object JSON"),
+        (b"\n", "empty JSONL line"),
+        (b'{"v":1', "truncated JSONL"),
+        (b'{"v":2,"type":"warning"}\n', "unsupported protocol version"),
+        (b'{"v":1,"type":"unknown"}\n', "after session_finish"),
+    ],
+)
+def test_real_worker_stream_final_read_rejects_corruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    suffix: bytes, diagnostic: str | None,
+) -> None:
+    test_file = tmp_path / "test_real_worker.py"
+    test_file.write_text("def test_ok():\n    assert True\n")
+    monkeypatch.delenv("_PYTEST_PARALLEL_WORKER", raising=False)
+    monkeypatch.delenv("PYTEST_PARALLEL_WORKER_ID", raising=False)
+    original = Coordinator._read_worker_events
+    injected = False
+
+    def read(self: Any, state: Any, items: Any, session: Any, terminal: Any, *, final: bool) -> None:
+        nonlocal injected
+        if final:
+            assert not state.process.is_alive()
+            with state.result_path.open("ab") as stream:
+                stream.write(suffix)
+            injected = True
+        original(self, state, items, session, terminal, final=final)
+
+    monkeypatch.setattr(Coordinator, "_read_worker_events", read)
+    rc = pytest.main([str(test_file), "-j", "1", "-q", "--import-mode=importlib"])
+    output = capsys.readouterr().out
+    assert injected, output
+    if diagnostic is None:
+        assert rc == pytest.ExitCode.OK, output
+        assert "1 passed" in output
+    else:
+        assert rc == pytest.ExitCode.TESTS_FAILED, output
+        assert diagnostic in output
+
+
+def test_real_worker_invalid_utf8_inside_json_event_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    test_file = tmp_path / "test_real_worker.py"
+    test_file.write_text("def test_ok():\n    assert True\n")
+    monkeypatch.delenv("_PYTEST_PARALLEL_WORKER", raising=False)
+    monkeypatch.delenv("PYTEST_PARALLEL_WORKER_ID", raising=False)
+    original = Coordinator._read_worker_events
+
+    def read(self: Any, state: Any, items: Any, session: Any, terminal: Any, *, final: bool) -> None:
+        if final:
+            assert not state.process.is_alive()
+            data = state.result_path.read_bytes()
+            assert data.startswith(b"{")
+            state.result_path.write_bytes(b'{"extra":"\xff",' + data[1:])
+            original(self, state, items, session, terminal, final=True)
+
+    monkeypatch.setattr(Coordinator, "_read_worker_events", read)
+    rc = pytest.main([str(test_file), "-j", "1", "-q", "--import-mode=importlib"])
+    output = capsys.readouterr().out
+    assert rc == pytest.ExitCode.TESTS_FAILED, output
+    assert "invalid UTF-8" in output
