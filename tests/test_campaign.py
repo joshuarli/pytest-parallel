@@ -6,6 +6,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
@@ -109,6 +111,44 @@ def test_hooks_weights_groups_and_pin_via_plan(tmp_path: Path) -> None:
     assert all(u["worker"] == 1 and u["pinned"] for u in db_units)
     heavy = [u for w in plan["workers"] for u in w["units"] if u["files"] == ["test_heavy.py"]]
     assert heavy[0]["weight"] == 10.0
+
+
+def test_missing_hooks_use_defaults(tmp_path: Path) -> None:
+    from pytest_parallel.coordinator import Coordinator
+
+    config = SimpleNamespace(rootpath=tmp_path, hook=SimpleNamespace())
+    coordinator = Coordinator(cast(Any, config), 2)
+    units = coordinator._build_units([_item("test_a.py::test_a"), _item("test_b.py::test_b")])
+    assert [unit.weight for unit in units] == [1.0, 1.0]
+    assert [unit.groups for unit in units] == [(), ()]
+    assert coordinator._resolve_pins(units, 2) == {}
+
+
+@pytest.mark.parametrize(
+    ("hook", "args"),
+    [
+        ("pytest_parallel_file_groups", "path, items"),
+        ("pytest_parallel_file_weight", "path, items"),
+        ("pytest_parallel_shard_worker", "shard, num_workers"),
+    ],
+)
+def test_hook_attribute_error_fails_plan(tmp_path: Path, hook: str, args: str) -> None:
+    (tmp_path / "test_a.py").write_text("def test_a(): pass\n")
+    (tmp_path / "test_b.py").write_text("def test_b(): pass\n")
+    (tmp_path / "conftest.py").write_text(
+        "from pathlib import Path\n"
+        "def pytest_parallel_pre_spawn(config, num_workers):\n"
+        "    Path('spawned').touch()\n"
+        f"def {hook}({args}):\n    raise AttributeError('hook failure')\n"
+    )
+    result = _run(["-j", "2", "--parallel-plan=json", "-q"], tmp_path, merge_output=False)
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "AttributeError: hook failure" in result.stderr
+    execution = _run(["-j", "2", "-q"], tmp_path)
+    assert execution.returncode != 0
+    assert "AttributeError: hook failure" in execution.stdout
+    assert not (tmp_path / "spawned").exists()
 
 
 def test_conftest_hooks_stay_inside_their_directory(tmp_path: Path) -> None:
