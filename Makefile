@@ -1,4 +1,4 @@
-.PHONY: build check lint test coverage preflight bump publish publish-mypypi
+.PHONY: build check lint test coverage mutants-scheduling preflight bump publish publish-mypypi
 
 BUMP ?= minor
 
@@ -53,4 +53,4 @@ coverage:
 	uv run coverage json -o "$$dir/coverage.json"
 
 mutants-scheduling:
-	python3 scripts/mutants_scheduling.py
+	uv run python scripts/mutants_scheduling.py

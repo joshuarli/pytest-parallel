@@ -13,9 +13,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PREFIX = 'pytest_parallel.scheduling.'
 EQUIVALENT = {
+    # Union root choices preserve components; merge emits original file order.
     'x_merge_units__mutmut_12', 'x_merge_units__mutmut_13', 'x_merge_units__mutmut_14',
+    # Controller file ordinals and merged component indices have the same order.
     'x_assign_units__mutmut_11', 'x_assign_units__mutmut_13',
+    # Round-robin never reads these loads; plan weights come from the buckets.
     'x_assign_units__mutmut_50', 'x_assign_units__mutmut_51',
+    # Controller assignment and plan share the same unit objects, so lookup defaults are unreachable.
     'x_plan_dict__mutmut_51', 'x_plan_dict__mutmut_53', 'x_plan_dict__mutmut_55',
     'x_plan_dict__mutmut_56',
 }
@@ -28,12 +32,15 @@ def run(args: list[str], cwd: Path, env: dict[str, str], *, capture: bool = Fals
                           text=True, start_new_session=True) as process:
         try:
             output, _ = process.communicate(timeout=max(0.01, DEADLINE - time.monotonic()))
+            if process.returncode:
+                raise subprocess.CalledProcessError(process.returncode, args)
         except BaseException:
-            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             process.wait()
             raise
-        if process.returncode:
-            raise subprocess.CalledProcessError(process.returncode, args)
     return output or ''
 
 
