@@ -85,6 +85,7 @@ def test_shard_is_frozen() -> None:
 
 
 def test_hooks_weights_groups_and_pin_via_plan(tmp_path: Path) -> None:
+    (tmp_path / "pytest.ini").write_text("[pytest]\n")
     (tmp_path / "test_heavy.py").write_text("def test_a():\n assert True\ndef test_b():\n assert True\n")
     (tmp_path / "test_light.py").write_text("def test_c():\n assert True\n")
     (tmp_path / "test_db1.py").write_text("def test_d():\n assert True\n")

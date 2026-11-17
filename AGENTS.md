@@ -9,6 +9,16 @@ A pytest plugin that collects in the parent session and assigns whole test files
 - `make build` builds the wheel.
 - `uv run python benchmarks/run_benchmarks.py` runs the benchmark harness (see [docs/benchmarks.md](docs/benchmarks.md)).
 
+## Verification
+
+- `make test` runs the suite; `make lint` runs Ruff and ty. Two gated warm test runs took 6.18s and 6.13s; one lint run took 0.74s (macOS, Python 3.15.2). Cold cost is unmeasured.
+- CLI scheduling and usage errors: `tests/test_options.py`; plan JSON v1 and exit behavior: `tests/test_campaign.py::test_json_plan_stdout_is_one_document` and `test_json_plan_collection_error_is_nonzero`.
+- `Shard` and scheduling hooks: `tests/test_campaign.py::test_shard_is_frozen`, `test_hooks_weights_groups_and_pin_via_plan`, and `test_conftest_hooks_stay_inside_their_directory`.
+- JSONL stream validation and reconciliation: `tests/test_p0_correctness.py::test_jsonl_protocol_rejects_truncated_and_malformed_streams` and `test_reconcile_rejects_contradictory_exit_status`.
+- Worker processes, recollection, and cleanup: `tests/test_campaign.py::test_start_methods_smoke`, `test_collection_mismatch_spawn_and_forkserver`, and `tests/test_backlog.py::test_sigterm_reaps_worker_and_removes_work_dir`.
+- Network isolation and exceptions: `tests/test_integration.py::test_network_policy_and_loopback_exception`, `test_marker_allows_network`, and `test_serial_network_is_not_guarded`.
+- Performance workload: `benchmarks/run_benchmarks.py`; workload gate and costs remain unmeasured. Library consumers: stuff and toolbox; consumer checks remain unverified.
+
 ## Invariants
 
 - Fixed workers and static assignment only: no work stealing or dynamic dispatch. All scheduling happens in the controller after collection and before workers run tests. `--parallel-plan=json` writes one JSON document (`version` 1) and a trailing newline to stdout; diagnostics go to stderr. Collection errors and `UsageError` stay non-zero and do not print a plan.

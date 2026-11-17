@@ -3,6 +3,8 @@ Next: 6
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier Calibration). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
+Ground prerequisite at cff9e0f: the plan fixture inherited the repository pytest root under `.work/tmp`; a local pytest.ini isolates it. Warm gated `make test` 6.13s and `make lint` 0.74s (macOS, Python 3.15.2); cold cost, CI test workflow, and performance decision remain unverified.
+
 ## Report
 
 Not started.
@@ -13,7 +15,7 @@ Not started.
 
 - **Area:** deslop · ground
 - **Where:** AGENTS.md, Makefile, .github/workflows/
-- **Problem:** Base b94019e; code lines Python 4.4k (fleet/loc/v1, vendored included); timings not yet measured. Open fleet lint findings: python-standard 6, make-clean-target 1. Consumers in the fleet: stuff, toolbox; their tests are the consumer check for API changes. Perf gate: decide in Ground whether a user-visible hot path needs a workload. Known red: tests/test_campaign.py::test_hooks_weights_groups_and_pin_via_plan fails when TMPDIR is under a repository's .work/tmp (the fleet convention) and passes with the system TMPDIR, so test isolation depends on the temp path. pytest-parallel has no coverage support, which blocks Python coverage in stuff and toolbox: add it in the Tests step.
+- **Problem:** Base b94019e; code lines Python 4.4k (fleet/loc/v1, vendored included); see header for prerequisite baseline and remaining timing gap. Open fleet lint findings: python-standard 6, make-clean-target 1. Consumers in the fleet: stuff, toolbox; their tests are the consumer check for API changes. Perf gate: decide in Ground whether a user-visible hot path needs a workload. The TMPDIR-sensitive plan fixture is isolated by the Ground prerequisite; full Ground acceptance remains open. pytest-parallel has no coverage support, which blocks Python coverage in stuff and toolbox: add it in the Tests step.
 - **Recommendation:** Run the deslop Ground step. Accept: CI runs make test and is green, and AGENTS.md has a Verification section.
 - **Fix with:** deslop
 - **Effort:** S
