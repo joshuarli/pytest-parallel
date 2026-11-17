@@ -246,20 +246,16 @@ class Coordinator:
             file_unit.groups.update(_extract_parallel_groups(item))
         for file_unit in files:
             hook = self._scoped_hook(session, self._absolute_file(file_unit))
-            if hook is not None and hasattr(hook, "pytest_parallel_file_groups"):
-                try:
-                    results = hook.pytest_parallel_file_groups(path=file_unit.path, items=list(file_unit.items))
-                except AttributeError:
-                    results = []
+            groups_hook = getattr(hook, "pytest_parallel_file_groups", None)
+            if groups_hook is not None:
+                results = groups_hook(path=file_unit.path, items=list(file_unit.items))
                 if isinstance(results, list):
                     for result in results:
                         file_unit.groups.update(_validate_hook_groups(result, file_unit.path, "pytest_parallel_file_groups"))
             weight: float = float(len(file_unit.items))
-            if hook is not None and hasattr(hook, "pytest_parallel_file_weight"):
-                try:
-                    hook_weight = hook.pytest_parallel_file_weight(path=file_unit.path, items=list(file_unit.items))
-                except AttributeError:
-                    hook_weight = None
+            weight_hook = getattr(hook, "pytest_parallel_file_weight", None)
+            if weight_hook is not None:
+                hook_weight = weight_hook(path=file_unit.path, items=list(file_unit.items))
                 if hook_weight is not None:
                     weight = _validate_hook_weight(hook_weight, file_unit.path)
                     if not file_unit.items and weight != weight:
@@ -275,10 +271,7 @@ class Coordinator:
             return pins
         for idx, unit in enumerate(units):
             shard = unit.shard()
-            try:
-                results = self._shard_worker_results(caller, session, unit, num_workers)
-            except AttributeError:
-                continue
+            results = self._shard_worker_results(caller, session, unit, num_workers)
             if not isinstance(results, list):
                 results = [results]
             requested: set[int] = set()

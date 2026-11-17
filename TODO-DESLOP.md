@@ -61,6 +61,8 @@ The manifest and lockfile pin the same tools; no prior scratch file is needed.
 
 ### DSLP-6 · P2 · Scheduling hook AttributeErrors silently discard customization
 
+- **Status:** fixed; see [hook error evidence](docs/deslop-hook-errors.md).
+
 - **Area:** scheduling hooks
 - **Where:** src/pytest_parallel/coordinator.py:249, src/pytest_parallel/coordinator.py:258, src/pytest_parallel/coordinator.py:278
 - **Problem:** The handler catches AttributeError raised by hook implementations as if the hook were absent. A broken affinity hook can silently split files across workers, a failed pin can move a shard, and a failed weight silently uses test count. Built wheel repro: create a pytest.ini containing [pytest], test_a.py and test_b.py each containing one passing test, and conftest.py defining `def pytest_parallel_file_groups(path, items): raise AttributeError("hook failed")`; run `PYTHONPATH="$PWD/.work/tmp/diagnose-wheel-unpacked" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -p pytest_parallel.plugin -j 2 --parallel-plan=json .work/tmp/diagnose-hook`. Actual exit 0, two units on separate workers, no diagnostic; expected a nonzero exit reporting the hook failure and no plan. With analogous weight and shard-worker hooks the same command exited 0 with default weights and no pins; replacing AttributeError with ValueError exited 3 with the diagnostic and empty stdout. Wheel was built with `uv build --wheel --out-dir .work/tmp/diagnose-wheel` and unpacked into the PYTHONPATH directory.
