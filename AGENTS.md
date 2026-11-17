@@ -19,6 +19,9 @@ A pytest plugin that collects in the parent session and assigns whole test files
 - Network isolation and exceptions: `tests/test_integration.py::test_network_policy_and_loopback_exception`, `test_marker_allows_network`, and `test_serial_network_is_not_guarded`.
 - Performance: `benchmarks/run_benchmarks.py` exercises scheduler shapes but is CPU-trivial; a reproducible representative workload is required for runtime changes (see Ground evidence). Consumers: stuff and toolbox; unaffected by this docs-only change, checks not run (toolbox billing excluded).
 
+- Coverage: `make coverage` uses native coverage.py with two workers and checks worker data; `tests/test_coverage.py` proves the installed-wheel worker/branch oracle and negative control. See [coverage evidence](docs/deslop-coverage.md) for settings, tier costs and limitations.
+- Edit: `uv run pytest -p no:parallel tests/test_coverage.py -q`; change: `make coverage` and `make lint`; full: explicitly requested `make test`. Mutation and CI qualification remain open.
+
 ## Invariants
 
 - Fixed workers and static assignment only: no work stealing or dynamic dispatch. All scheduling happens in the controller after collection and before workers run tests. `--parallel-plan=json` writes one JSON document (`version` 1) and a trailing newline to stdout; diagnostics go to stderr. Collection errors and `UsageError` stay non-zero and do not print a plan.
