@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import io
 import json
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
@@ -155,6 +157,22 @@ def snapshot(revision: str, destination: Path) -> None:
         files.extractall(destination, members=members, filter="data")
 
 
+def inventory(directory: Path, source: str, selectors: tuple[str, ...]) -> dict[str, int | None]:
+    meta = json.loads((directory / "mutants" / f"{source}.meta").read_text(encoding="utf-8"))
+    available = meta.get("exit_code_by_key") if isinstance(meta, dict) else None
+    if not isinstance(available, dict):
+        raise ValueError(f"missing mutation inventory for {source}")
+    selection: dict[str, int | None] = {}
+    for pattern in selectors:
+        matches = {name: status for name, status in available.items() if fnmatchcase(name, pattern)}
+        if not matches:
+            raise ValueError(f"empty mutation selection for {pattern}")
+        selection.update(matches)
+    if any(value is not None and type(value) is not int for value in selection.values()):
+        raise ValueError(f"malformed mutation outcomes for {source}")
+    return selection
+
+
 def results(
     mutmut: str,
     directory: Path,
@@ -162,16 +180,7 @@ def results(
     source: str,
     selectors: tuple[str, ...],
 ) -> dict[str, str]:
-    meta = json.loads((directory / "mutants" / f"{source}.meta").read_text(encoding="utf-8"))
-    available = meta.get("exit_code_by_key") if isinstance(meta, dict) else None
-    if not isinstance(available, dict):
-        raise ValueError(f"missing mutation inventory for {source}")
-    selection: set[str] = set()
-    for pattern in selectors:
-        matches = {name for name in available if fnmatchcase(name, pattern)}
-        if not matches:
-            raise ValueError(f"empty mutation selection for {pattern}")
-        selection.update(matches)
+    selection = inventory(directory, source, selectors)
     observed = {}
     for line in run([mutmut, "results", "--all", "true"], directory, env, capture=True).splitlines():
         name, separator, status = line.strip().partition(": ")
@@ -179,8 +188,8 @@ def results(
             if name in observed:
                 raise ValueError(f"duplicate result for {name}")
             observed[name] = status
-    if set(observed) != selection:
-        raise ValueError(f"missing results for {source}: {sorted(selection - observed.keys())}")
+    if observed.keys() != selection.keys():
+        raise ValueError(f"missing results for {source}: {sorted(selection.keys() - observed.keys())}")
     return observed
 
 
@@ -208,7 +217,18 @@ def run_scope(
     )
     config.write_text(contents, encoding="utf-8")
     command = [mutmut, "run", "--max-children", "1"]
-    run([*command, *selectors], directory, env)
+    try:
+        run([*command, *selectors], directory, env)
+    except subprocess.TimeoutExpired:
+        try:
+            partial = Counter(inventory(directory, source, selectors).values())
+        except (OSError, ValueError) as error:
+            print(f"mutation inventory unavailable at timeout for {source}: {error}", flush=True)
+        else:
+            labels = {None: "unrun", 0: "survived", 1: "killed"}
+            outcome_counts = {labels.get(status, f"code {status}"): count for status, count in partial.items()}
+            print(f"partial mutation outcomes for {source}: {outcome_counts}", flush=True)
+        raise
     observed = results(mutmut, directory, env, source, selectors)
     timeouts = tuple(name for name, status in observed.items() if status == "timeout")
     if timeouts:
@@ -225,8 +245,6 @@ def run_scope(
 
 
 def run_selection(selectors: dict[str, tuple[str, ...]], revision: str) -> bool:
-    if unsupported := set(selectors) - TESTS.keys():
-        raise ValueError(f"missing mutation witness selection: {sorted(unsupported)}")
     scratch = ROOT / ".work" / "tmp"
     scratch.mkdir(parents=True, exist_ok=True)
     mutmut = os.environ.get("MUTMUT", "mutmut")
@@ -249,15 +267,18 @@ def run_selection(selectors: dict[str, tuple[str, ...]], revision: str) -> bool:
 
 
 def main() -> None:
-    plan = len(sys.argv) == 3 and sys.argv[1] == "--plan"
-    if not plan and len(sys.argv) != 2:
-        raise ValueError("usage: mutants_diff.py [--plan] BASE")
+    parser = argparse.ArgumentParser(description="Select and run the serial mutation gate")
+    parser.add_argument("base")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--plan", action="store_true")
+    mode.add_argument("--shard", choices=sorted(PurePosixPath(path).stem for path in TESTS))
+    args = parser.parse_args()
     revision = None
-    if not plan:
+    if not args.plan:
         if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=normal"], cwd=ROOT):
             raise ValueError("commit the selected changes before running the mutation gate")
         revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    selection = select_mutations(changed_paths(sys.argv[-1], revision=revision))
+    selection = select_mutations(changed_paths(args.base, revision=revision))
     selectors = selection.selectors()
     print(json.dumps({
         "changes": selection.classes,
@@ -267,8 +288,15 @@ def main() -> None:
     }, indent=2), flush=True)
     if not selectors:
         print("no relevant changes")
-    elif revision is not None and not run_selection(selectors, revision):
-        raise ValueError("mutation gate found a miss or unclassified result")
+    elif revision is not None:
+        if unsupported := set(selectors) - TESTS.keys():
+            raise ValueError(f"missing mutation witness selection: {sorted(unsupported)}")
+        if args.shard:
+            selectors = {path: patterns for path, patterns in selectors.items() if PurePosixPath(path).stem == args.shard}
+        if not selectors:
+            print(f"no mutations selected for shard {args.shard}")
+        elif not run_selection(selectors, revision):
+            raise ValueError("mutation gate found a miss or unclassified result")
 
 
 if __name__ == "__main__":
