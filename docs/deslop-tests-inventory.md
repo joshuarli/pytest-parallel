@@ -84,6 +84,39 @@ The mutation run uses direct option tests. Ordinary option testing
 executes the subprocess and pytest startup cases as well. All 36 ordinary
 option tests, Ruff and ty passed locally.
 
+## Coordinator file planning
+
+Against `8da30d09`, direct file-hook tests raised detection from 33
+to 67 of the same 83 `Coordinator._build_units` mutations. The two
+runs used coordinator blob `db7b1141d559d3690ef83dff686873076bff4f9a`.
+The tests exercise grouping, collected item order, the hook's private
+copy of the item list, summed overrides and defaults, and rejection
+of nonpositive or nonfinite values.
+
+The redundant guard after weight validation needs both an empty
+file and a NaN weight. The coordinator creates each file entry while
+adding an item, and hooks receive copies of that item list. The
+existing validator rejects NaN before returning. Removing the guard
+leaves 79 generated identities in coordinator blob
+`7f5a114fe22945f97beac131eb25e47b7c0dba5c`. The final run caught
+67 and left 12 survivors. Those survivors and the other coordinator
+functions remain open.
+
+Use the same serial mutmut setup as the options scenario, setting
+`only_mutate = ["src/pytest_parallel/coordinator.py"]` and selecting
+`tests/test_campaign.py -k 'missing_hooks or file_hooks_group or file_hook_rejects'`.
+Run `mutmut run --max-children 1 'pytest_parallel.coordinator.xǁCoordinatorǁ_build_units__mutmut_*'`
+with pytest plugin autoload disabled. The ordinary suite passed all
+173 tests on macOS arm64.
+
+A follow-up at `8197c593` caught all 79 of those same identities with
+the same instrumented source blob. The test verifies that the path's
+scoped hook receives an absolute path while its public arguments and
+result use the root-relative path. A marker on one file and a hook on
+another join the files into one unit. The hook assertions also cover
+item copies, invalid group names and diagnostics that identify the
+source path. The command above selects these cases.
+
 ## Whole-change gate trial
 
 The trial runs `scripts/mutants_diff.py BASE` on a clean committed
