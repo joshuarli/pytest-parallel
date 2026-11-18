@@ -22,6 +22,10 @@ ROOT = Path(__file__).resolve().parent.parent
 SOURCE = PurePosixPath("src/pytest_parallel")
 CONFIGURATION = frozenset({".envrc", ".gitignore", "Dockerfile", "Makefile", "pyproject.toml", "uv.lock"})
 DOCUMENTATION = frozenset({"AGENTS.md", "CHANGELOG.md", "LICENSE", "README.md", "TODO.md", "TODO-DESLOP.md"})
+COORDINATOR_PLAN = "pytest_parallel.coordinator.xǁCoordinatorǁ_build_units__mutmut_*"
+COORDINATOR_PLAN_TESTS = [
+    "tests/test_campaign.py", "-k", "missing_hooks or file_hooks_group or file_hook_rejects",
+]
 PROTECTED_FUNCTIONS = {
     "src/pytest_parallel/coordinator.py": (
         "xǁCoordinatorǁ_build_units",
@@ -204,7 +208,7 @@ def equivalent(source: str, snapshot_hash: str, name: str) -> bool:
 
 
 def run_scope(
-    mutmut: str, directory: Path, source: str, selectors: tuple[str, ...], scratch: Path,
+    mutmut: str, directory: Path, source: str, selectors: tuple[str, ...], tests: list[str], scratch: Path,
 ) -> bool:
     env = dict(os.environ, PYTHONPATH=str(directory / "src"), TMPDIR=str(scratch))
     env.pop("MUTANT_UNDER_TEST", None)
@@ -213,7 +217,7 @@ def run_scope(
         '\n[tool.mutmut]\nsource_paths = ["src"]\n'
         f"only_mutate = {json.dumps([source])}\n"
         'pytest_add_cli_args = ["-p", "no:parallel"]\n'
-        f"pytest_add_cli_args_test_selection = {json.dumps(TESTS[source])}\n"
+        f"pytest_add_cli_args_test_selection = {json.dumps(tests)}\n"
     )
     config.write_text(contents, encoding="utf-8")
     command = [mutmut, "run", "--max-children", "1"]
@@ -244,7 +248,25 @@ def run_scope(
     return all(status in {"killed", "confirmed timeout", "equivalent"} for status in observed.values())
 
 
-def run_selection(selectors: dict[str, tuple[str, ...]], revision: str) -> bool:
+def mutation_jobs(
+    selectors: dict[str, tuple[str, ...]],
+) -> dict[str, tuple[str, tuple[str, ...], list[str]]]:
+    jobs = {}
+    for source, patterns in selectors.items():
+        shard = PurePosixPath(source).stem
+        tests = TESTS[source]
+        if COORDINATOR_PLAN in patterns:
+            jobs["coordinator-plan"] = (source, (COORDINATOR_PLAN,), COORDINATOR_PLAN_TESTS)
+            patterns = tuple(pattern for pattern in patterns if pattern != COORDINATOR_PLAN)
+        elif shard == "coordinator":
+            test_file, _, test_names = COORDINATOR_PLAN_TESTS
+            tests = [tests[0], test_file, "-k", f"{tests[-1]} or {test_names}"]
+        if patterns:
+            jobs[shard] = (source, patterns, tests)
+    return jobs
+
+
+def run_selection(jobs: dict[str, tuple[str, tuple[str, ...], list[str]]], revision: str) -> bool:
     scratch = ROOT / ".work" / "tmp"
     scratch.mkdir(parents=True, exist_ok=True)
     mutmut = os.environ.get("MUTMUT", "mutmut")
@@ -254,14 +276,15 @@ def run_selection(selectors: dict[str, tuple[str, ...]], revision: str) -> bool:
         snapshot(revision, directory)
         if "3.8.1" not in run([mutmut, "--version"], directory, dict(os.environ), capture=True).split():
             raise ValueError("mutmut 3.8.1 is required")
-        for source, patterns in selectors.items():
+        for shard, (source, patterns, tests) in jobs.items():
+            print(f"running {shard}", flush=True)
             candidate = directory / "candidate"
             candidate.mkdir()
             for name in ("src", "tests"):
                 shutil.copytree(directory / name, candidate / name)
             for name in ("pyproject.toml", "uv.lock"):
                 shutil.copyfile(directory / name, candidate / name)
-            passed = run_scope(mutmut, candidate, source, patterns, scratch) and passed
+            passed = run_scope(mutmut, candidate, source, patterns, tests, scratch) and passed
             shutil.rmtree(candidate)
     return passed
 
@@ -271,7 +294,7 @@ def main() -> None:
     parser.add_argument("base")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--plan", action="store_true")
-    mode.add_argument("--shard", choices=sorted(PurePosixPath(path).stem for path in TESTS))
+    mode.add_argument("--shard", choices=sorted(["coordinator-plan", *(PurePosixPath(path).stem for path in TESTS)]))
     args = parser.parse_args()
     revision = None
     if not args.plan:
@@ -291,11 +314,12 @@ def main() -> None:
     elif revision is not None:
         if unsupported := set(selectors) - TESTS.keys():
             raise ValueError(f"missing mutation witness selection: {sorted(unsupported)}")
+        jobs = mutation_jobs(selectors)
         if args.shard:
-            selectors = {path: patterns for path, patterns in selectors.items() if PurePosixPath(path).stem == args.shard}
-        if not selectors:
+            jobs = {name: job for name, job in jobs.items() if name == args.shard}
+        if not jobs:
             print(f"no mutations selected for shard {args.shard}")
-        elif not run_selection(selectors, revision):
+        elif not run_selection(jobs, revision):
             raise ValueError("mutation gate found a miss or unclassified result")
 
 
