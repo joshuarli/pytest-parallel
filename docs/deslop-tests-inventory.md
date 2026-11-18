@@ -187,3 +187,30 @@ reconcile_rejects or complete_events_before_partial or report_event`.
 Run `mutmut run --max-children 1
 'pytest_parallel.coordinator.xǁCoordinatorǁ_handle_report_event__mutmut_*'`.
 For the original tests, omit the final keyword alternative.
+
+## Worker stop and drain
+
+The stop tests cover both pytest stop conditions, an exit before
+the drain deadline, and escalation at the deadline. They verify the
+final event read occurs after the join and before reconciliation.
+The terminal reporter resumes with its earlier setting and registration.
+Process doubles constrained to the multiprocessing interface verify
+terminate, join and kill calls for a stubborn child and leave an
+already reaped child alone.
+
+At `25e57a1`, these cases raised the caught count from 39 to 114
+of the same 167 identities. The coordinator source blob stayed
+`c3a1fd9555f8e50844a2e913fca601e2deb8a794`. All 51 remaining
+monitor identities are open. Two cleanup survivors remove default
+values for process attributes that every supported multiprocessing
+context exposes.
+
+Use the serial Mutmut 3.8.1 setup above with
+`only_mutate = ["src/pytest_parallel/coordinator.py"]` and
+`tests/test_p0_correctness.py`. Set the keyword filter to
+`terminal_reporter_restored or keyboard_interrupt or monitor_drains or worker_cleanup`.
+Select `pytest_parallel.coordinator.xǁCoordinatorǁ_monitor__mutmut_*`,
+`pytest_parallel.coordinator.xǁCoordinatorǁ_terminate_live_workers__mutmut_*`
+and `pytest_parallel.coordinator.xǁCoordinatorǁ_trigger_global_stop__mutmut_*`.
+Compare the selected keys and outcomes in
+`mutants/src/pytest_parallel/coordinator.py.meta`.
