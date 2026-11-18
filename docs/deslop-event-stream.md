@@ -1,5 +1,12 @@
 # Coordinator event stream scenario
 
+At `1fd7566`, the reader's truncation diagnostic now has a literal
+120-character limit witness. Mutmut 3.8.1 selected reader identity
+`_read_worker_events__mutmut_29` and the witness caught it. This addresses
+the 121-character diagnostic difference recorded below. The five
+final-offset and codec-spelling cases keep their existing dispositions.
+The hosted whole-change lane remains open.
+
 Bounded inventory, defined before mutation: every mutmut identity generated for
 `Coordinator._read_worker_events` and `Coordinator._process_worker_event` in
 `src/pytest_parallel/coordinator.py` at base `2c6957155dce22853dbadd9ade66e8b0cbc59fbe`.
