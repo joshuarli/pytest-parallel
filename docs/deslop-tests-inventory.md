@@ -146,6 +146,14 @@ with 264 caught, 11 equivalent and one confirmed timeout. At
 `f320bda` against `4f498ebd`, the file-planning shard caught all
 79 selected identities through this same driver.
 
+The worker shard caught all 60 report identities through `make
+mutants-diff` at `19775d6`. It runs the two in-process report
+observers. An earlier selection also ran child CLI checks in the
+mutation environment, where plugin autoload is disabled. Those
+checks require the normal plugin and remain in the ordinary suite.
+The draft tries the four locally qualified shards on Linux and
+macOS. The remaining coordinator and socket selections stay open.
+
 On the first aggregate attempt, `f7c2795` against `8da30d09`
 exhausted 1,200 seconds in the coordinator. It processed 130 of
 559 selected coordinator mutations, with 48 caught and 82 survivors.
