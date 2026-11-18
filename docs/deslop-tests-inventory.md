@@ -147,7 +147,8 @@ head with mutmut 3.8.1 in the test environment. Set `MUTMUT` to that
 environment's executable. Use `--plan` to inspect a dirty change or
 `--shard plugin` to execute one lane. Coordinator file planning uses
 `--shard coordinator-plan`, and worker pins and limits use
-`--shard coordinator-pins`. A production change to the coordinator
+`--shard coordinator-pins`. Report validation uses
+`--shard coordinator-report`. A production change to the coordinator
 selects the whole module and includes the event, planning and pin witnesses.
 The gate archives the tested
 revision and runs the existing serial recipes. Unknown paths, missing

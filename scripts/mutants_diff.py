@@ -23,6 +23,7 @@ SOURCE = PurePosixPath("src/pytest_parallel")
 CONFIGURATION = frozenset({".envrc", ".gitignore", "Dockerfile", "Makefile", "pyproject.toml", "uv.lock"})
 DOCUMENTATION = frozenset({"AGENTS.md", "CHANGELOG.md", "LICENSE", "README.md", "TODO.md", "TODO-DESLOP.md"})
 COORDINATOR_PLAN = "pytest_parallel.coordinator.xǁCoordinatorǁ_build_units__mutmut_*"
+COORDINATOR_REPORT = "pytest_parallel.coordinator.xǁCoordinatorǁ_handle_report_event__mutmut_*"
 COORDINATOR_PINS = (
     "pytest_parallel.coordinator.xǁCoordinatorǁ_resolve_pins__mutmut_*",
     "pytest_parallel.coordinator.xǁCoordinatorǁ_resolve_max_workers__mutmut_*",
@@ -33,11 +34,17 @@ COORDINATOR_PLAN_TESTS = [
 COORDINATOR_PINS_TESTS = [
     "tests/test_campaign.py", "-k", "missing_hooks or shard_pin_votes or worker_limit_hook",
 ]
+COORDINATOR_REPORT_TESTS = [
+    "tests/test_p0_correctness.py", "-k",
+    "protocol_validation or missing_call_report or incomplete_finish or reconcile_rejects "
+    "or complete_events_before_partial or report_event",
+]
 PROTECTED_FUNCTIONS = {
     "src/pytest_parallel/coordinator.py": (
         "xǁCoordinatorǁ_build_units",
         "xǁCoordinatorǁ_resolve_pins",
         "xǁCoordinatorǁ_resolve_max_workers",
+        "xǁCoordinatorǁ_handle_report_event",
         "xǁCoordinatorǁ_spawn",
         "xǁCoordinatorǁ_monitor",
         "xǁCoordinatorǁ_terminate_live_workers",
@@ -67,7 +74,8 @@ TESTS = {
     "src/pytest_parallel/coordinator.py": [
         "tests/test_p0_correctness.py", "-k",
         "protocol_validation or partial_jsonl or invalid_utf8 or real_worker_stream or incomplete_finish "
-        "or missing_call_report or reconcile_rejects or complete_events_before_partial or missing_worker_stream",
+        "or missing_call_report or reconcile_rejects or complete_events_before_partial or missing_worker_stream "
+        "or report_event",
     ],
     "src/pytest_parallel/network.py": [
         "tests/test_integration.py", "-k", "network_address_and_resolver_boundary",
@@ -266,7 +274,9 @@ def mutation_jobs(
         if COORDINATOR_PLAN in patterns:
             jobs["coordinator-plan"] = (source, (COORDINATOR_PLAN,), COORDINATOR_PLAN_TESTS)
             jobs["coordinator-pins"] = (source, COORDINATOR_PINS, COORDINATOR_PINS_TESTS)
-            patterns = tuple(pattern for pattern in patterns if pattern not in (COORDINATOR_PLAN, *COORDINATOR_PINS))
+            jobs["coordinator-report"] = (source, (COORDINATOR_REPORT,), COORDINATOR_REPORT_TESTS)
+            separate = (COORDINATOR_PLAN, COORDINATOR_REPORT, *COORDINATOR_PINS)
+            patterns = tuple(pattern for pattern in patterns if pattern not in separate)
         elif shard == "coordinator":
             test_file, _, test_names = COORDINATOR_PLAN_TESTS
             tests = [tests[0], test_file, "-k", f"{tests[-1]} or {test_names} or {COORDINATOR_PINS_TESTS[-1]}"]
@@ -304,7 +314,11 @@ def main() -> None:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--plan", action="store_true")
     mode.add_argument(
-        "--shard", choices=sorted(["coordinator-pins", "coordinator-plan", *(PurePosixPath(path).stem for path in TESTS)]),
+        "--shard",
+        choices=sorted([
+            "coordinator-pins", "coordinator-plan", "coordinator-report",
+            *(PurePosixPath(path).stem for path in TESTS),
+        ]),
     )
     args = parser.parse_args()
     revision = None
