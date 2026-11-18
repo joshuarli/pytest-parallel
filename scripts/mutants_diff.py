@@ -23,8 +23,15 @@ SOURCE = PurePosixPath("src/pytest_parallel")
 CONFIGURATION = frozenset({".envrc", ".gitignore", "Dockerfile", "Makefile", "pyproject.toml", "uv.lock"})
 DOCUMENTATION = frozenset({"AGENTS.md", "CHANGELOG.md", "LICENSE", "README.md", "TODO.md", "TODO-DESLOP.md"})
 COORDINATOR_PLAN = "pytest_parallel.coordinator.xǁCoordinatorǁ_build_units__mutmut_*"
+COORDINATOR_PINS = (
+    "pytest_parallel.coordinator.xǁCoordinatorǁ_resolve_pins__mutmut_*",
+    "pytest_parallel.coordinator.xǁCoordinatorǁ_resolve_max_workers__mutmut_*",
+)
 COORDINATOR_PLAN_TESTS = [
     "tests/test_campaign.py", "-k", "missing_hooks or file_hooks_group or file_hook_rejects",
+]
+COORDINATOR_PINS_TESTS = [
+    "tests/test_campaign.py", "-k", "missing_hooks or shard_pin_votes or worker_limit_hook",
 ]
 PROTECTED_FUNCTIONS = {
     "src/pytest_parallel/coordinator.py": (
@@ -258,10 +265,11 @@ def mutation_jobs(
         tests = TESTS[source]
         if COORDINATOR_PLAN in patterns:
             jobs["coordinator-plan"] = (source, (COORDINATOR_PLAN,), COORDINATOR_PLAN_TESTS)
-            patterns = tuple(pattern for pattern in patterns if pattern != COORDINATOR_PLAN)
+            jobs["coordinator-pins"] = (source, COORDINATOR_PINS, COORDINATOR_PINS_TESTS)
+            patterns = tuple(pattern for pattern in patterns if pattern not in (COORDINATOR_PLAN, *COORDINATOR_PINS))
         elif shard == "coordinator":
             test_file, _, test_names = COORDINATOR_PLAN_TESTS
-            tests = [tests[0], test_file, "-k", f"{tests[-1]} or {test_names}"]
+            tests = [tests[0], test_file, "-k", f"{tests[-1]} or {test_names} or {COORDINATOR_PINS_TESTS[-1]}"]
         if patterns:
             jobs[shard] = (source, patterns, tests)
     return jobs
@@ -295,7 +303,9 @@ def main() -> None:
     parser.add_argument("base")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--plan", action="store_true")
-    mode.add_argument("--shard", choices=sorted(["coordinator-plan", *(PurePosixPath(path).stem for path in TESTS)]))
+    mode.add_argument(
+        "--shard", choices=sorted(["coordinator-pins", "coordinator-plan", *(PurePosixPath(path).stem for path in TESTS)]),
+    )
     args = parser.parse_args()
     revision = None
     if not args.plan:

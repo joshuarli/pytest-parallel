@@ -145,9 +145,10 @@ in the same serial run.
 The trial runs `scripts/mutants_diff.py BASE` on a clean committed
 head with mutmut 3.8.1 in the test environment. Set `MUTMUT` to that
 environment's executable. Use `--plan` to inspect a dirty change or
-`--shard plugin` to execute one lane. The coordinator's file-planning
-selection uses `--shard coordinator-plan`. A production change to the
-coordinator selects the whole module and includes both witness sets.
+`--shard plugin` to execute one lane. Coordinator file planning uses
+`--shard coordinator-plan`, and worker pins and limits use
+`--shard coordinator-pins`. A production change to the coordinator
+selects the whole module and includes the event, planning and pin witnesses.
 The gate archives the tested
 revision and runs the existing serial recipes. Unknown paths, missing
 witnesses, empty relevant selections, incomplete results, and budget
@@ -161,8 +162,17 @@ uncovered branch left 33 ordinary tests passing and exposed
 surviving `_parse_plan` mutations. A mixed-change plan selected
 both the unrelated scheduling module and the protected option scope
 after a test deletion. A docs-only plan reported no relevant changes.
-These checks used the local driver. The mixed negative still needs
-execution through the complete workflow.
+The [hosted positive](https://github.com/joshuarli/pytest-parallel/actions/runs/44257362822)
+at `80cce01` passed all eight mutation jobs on Linux ARM64 and macOS,
+using 668 total runner seconds, with a longest job of 170 seconds.
+The [uncovered branch](https://github.com/joshuarli/pytest-parallel/pull/34)
+left `_parse_plan` identities 19–22 alive on both platforms. The
+[deletion](https://github.com/joshuarli/pytest-parallel/pull/35) and
+[mixed change](https://github.com/joshuarli/pytest-parallel/pull/37)
+each reopened identity 18 on both platforms. The mixed scheduling
+selection passed. All eight jobs in the
+[documentation control](https://github.com/joshuarli/pytest-parallel/pull/36)
+reported no relevant changes. Ordinary checks passed all four controls.
 
 The standalone scheduling shard accounted for all 276 identities,
 with 264 caught, 11 equivalent and one confirmed timeout. At
@@ -174,8 +184,7 @@ mutants-diff` at `19775d6`. It runs the two in-process report
 observers. An earlier selection also ran child CLI checks in the
 mutation environment, where plugin autoload is disabled. Those
 checks require the normal plugin and remain in the ordinary suite.
-The draft tries the four locally qualified shards on Linux and
-macOS. The remaining coordinator and socket selections stay open.
+The remaining coordinator and socket selections stay open.
 
 On the first aggregate attempt, `f7c2795` against `8da30d09`
 exhausted 1,200 seconds in the coordinator. It processed 130 of
