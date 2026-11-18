@@ -741,6 +741,16 @@ def test_missing_worker_stream_is_reported(tmp_path: Path) -> None:
     state.result_path.unlink()
     coordinator._read_worker_events(state, items, session, Mock(), final=True)
     assert state.protocol_errors == ["worker 0 result file is missing"]
+
+
+def test_truncated_worker_stream_limits_the_diagnostic(tmp_path: Path) -> None:
+    coordinator, state, session, items = _make_harness(tmp_path, ["a.py::test_1"])
+    visible = "a" * 120
+    state.result_path.write_text(visible + "not-in-diagnostic")
+
+    coordinator._read_worker_events(state, items, session, Mock(), final=True)
+
+    assert state.protocol_errors == [f"truncated JSONL event at EOF from worker 0: {visible!r}"]
     coordinator._reconcile_worker(state, items, session, Mock(), None)
     assert session.testsfailed > 0
 
