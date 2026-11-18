@@ -6,9 +6,10 @@ import signal
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, Literal, cast
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -702,6 +703,75 @@ def test_keyboard_interrupt_terminates_workers_and_writes_stop_file(tmp_path: Pa
     assert (tmp_path / "stop").exists()
     state.process.terminate.assert_called()
 
+
+@pytest.mark.parametrize("stop_reason", ["shouldfail", "shouldstop"])
+@pytest.mark.parametrize("exits_during_drain", [False, True])
+def test_monitor_drains_stopping_worker_before_final_read(
+    tmp_path: Path, stop_reason: str, exits_during_drain: bool,
+) -> None:
+    nodeid = "a.py::test_1"
+    coordinator, state, session, items = _make_harness(tmp_path, [nodeid])
+    setattr(session, stop_reason, "stop requested")
+    reporter = Mock(showfspath=True)
+    session.config.pluginmanager.get_plugin.side_effect = [reporter, None]
+    state.process.is_alive.side_effect = [True, not exits_during_drain]
+    workers = [(0, state.process, state.result_path, state.output_path)]
+    clock = Mock()
+    clock.monotonic.side_effect = [100.0, 104.0, 105.0]
+    lifecycle = Mock()
+
+    with (
+        patch("pytest_parallel.coordinator.time", clock),
+        patch.object(coordinator, "_read_worker_events") as read,
+        patch.object(coordinator, "_reconcile_worker") as reconcile,
+        patch.object(coordinator, "_terminate_live_workers") as terminate,
+    ):
+        lifecycle.attach_mock(read, "read")
+        lifecycle.attach_mock(terminate, "terminate")
+        lifecycle.attach_mock(state.process.join, "join")
+        lifecycle.attach_mock(reconcile, "reconcile")
+        coordinator._monitor(workers, items, session, assigned_by_worker={0: [nodeid]})
+
+    assert (tmp_path / "stop").is_file()
+    clock.sleep.assert_called_once_with(0.01)
+    assert [event.kwargs["final"] for event in read.call_args_list] == [False, False, True]
+    expected = ["read", "read"]
+    if exits_during_drain:
+        terminate.assert_not_called()
+    else:
+        terminate.assert_called_once_with(workers)
+        expected.append("terminate")
+    assert [event[0] for event in lifecycle.mock_calls] == [*expected, "join", "read", "reconcile"]
+    state.process.join.assert_called_once_with(timeout=1.0)
+    final_state = read.call_args.args[0]
+    assert final_state.stopped_by_coordinator
+    assert final_state.assigned == [nodeid]
+    assert reconcile.call_args.args[0] is final_state
+    assert reporter.showfspath is True
+    session.config.pluginmanager.register.assert_called_once_with(reporter, "terminalreporter")
+
+
+def test_worker_cleanup_joins_exited_and_escalates_stubborn_processes(tmp_path: Path) -> None:
+    stubborn = Mock(spec=BaseProcess, pid=10, exitcode=None)
+    stubborn.is_alive.side_effect = [True, True, True]
+    exited = Mock(spec=BaseProcess, pid=11, exitcode=0)
+    exited.is_alive.return_value = False
+    pending = Mock(spec=BaseProcess, pid=12, exitcode=None)
+    pending.is_alive.return_value = False
+    workers = [(index, process, tmp_path / f"{index}.jsonl", tmp_path / f"{index}.log")
+               for index, process in enumerate([stubborn, exited, pending])]
+
+    Coordinator._terminate_live_workers(workers)
+
+    assert [event for event in stubborn.mock_calls if event[0] != "is_alive"] == [
+        call.terminate(), call.join(timeout=1.0), call.kill(), call.join(timeout=1.0),
+    ]
+    exited.terminate.assert_not_called()
+    exited.kill.assert_not_called()
+    exited.join.assert_not_called()
+    pending.terminate.assert_not_called()
+    pending.kill.assert_not_called()
+    pending.join.assert_called_once_with(timeout=1.0)
 
 
 @pytest.mark.parametrize(
