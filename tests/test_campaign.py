@@ -194,6 +194,79 @@ def test_file_hook_rejects_invalid_group_with_source_path(tmp_path: Path) -> Non
         coordinator._build_units([_item("a.py::one")])
 
 
+def test_shard_pin_votes_keep_zero_and_ignore_missing_votes(tmp_path: Path) -> None:
+    from pytest_parallel.coordinator import Coordinator
+
+    vote = Mock(side_effect=[[None, 0, 0], [1], [None]])
+    hooks = SimpleNamespace(pytest_parallel_shard_worker=vote)
+    coordinator = Coordinator(Mock(spec=pytest.Config, rootpath=tmp_path, hook=hooks), 2)
+    units = coordinator._build_units([_item(f"{name}.py::test") for name in ("a", "b", "c")])
+
+    assert coordinator._resolve_pins(units, 2) == {0: 0, 1: 1}
+    assert [call.kwargs for call in vote.call_args_list] == [
+        {"shard": unit.shard(), "num_workers": 2} for unit in units
+    ]
+
+
+def test_shard_pin_votes_use_the_session_hook_scope(tmp_path: Path) -> None:
+    from pytest_parallel.coordinator import Coordinator
+
+    local_vote = Mock(return_value=0)
+    implementation = SimpleNamespace(function=local_vote, argnames=("shard", "num_workers"))
+    root_vote = Mock(return_value=[1])
+    root_vote.get_hookimpls.return_value = [implementation]
+    hooks = SimpleNamespace(pytest_parallel_shard_worker=root_vote)
+    coordinator = Coordinator(Mock(spec=pytest.Config, rootpath=tmp_path, hook=hooks), 2)
+    units = coordinator._build_units([_item("a.py::test")])
+    session = SimpleNamespace(gethookproxy=Mock(return_value=hooks))
+
+    assert coordinator._resolve_pins(units, 2, session) == {0: 0}
+    session.gethookproxy.assert_called_once_with(tmp_path / "a.py")
+    local_vote.assert_called_once_with(shard=units[0].shard(), num_workers=2)
+    root_vote.assert_not_called()
+
+
+@pytest.mark.parametrize(("votes", "template"), [
+    ([True], "pytest_parallel_shard_worker for shard {files} must return an int worker index or None, got True"),
+    (["0"], "pytest_parallel_shard_worker for shard {files} must return an int worker index or None, got '0'"),
+    ([-1], "pytest_parallel_shard_worker for shard {files} returned worker -1, outside [0, 2)"),
+    ([2], "pytest_parallel_shard_worker for shard {files} returned worker 2, outside [0, 2)"),
+    ([1, 0], "conflicting pytest_parallel_shard_worker pins for shard {files}: [0, 1]"),
+])
+def test_shard_pin_votes_reject_invalid_or_conflicting_results(
+    tmp_path: Path, votes: list[object], template: str,
+) -> None:
+    from pytest_parallel.coordinator import Coordinator
+
+    hooks = SimpleNamespace(pytest_parallel_shard_worker=Mock(return_value=votes))
+    coordinator = Coordinator(Mock(spec=pytest.Config, rootpath=tmp_path, hook=hooks), 2)
+    units = coordinator._build_units([_item("a.py::test")])
+
+    with pytest.raises(pytest.UsageError) as error:
+        coordinator._resolve_pins(units, 2)
+    assert str(error.value) == template.format(files=[Path("a.py")])
+
+
+@pytest.mark.parametrize(("result", "expected"), [(None, 64), (1, 1), (3, 3)])
+def test_worker_limit_hook_keeps_positive_or_default(tmp_path: Path, result: int | None, expected: int) -> None:
+    from pytest_parallel.coordinator import Coordinator
+
+    hooks = SimpleNamespace(pytest_parallel_max_workers=Mock(return_value=result))
+    coordinator = Coordinator(Mock(spec=pytest.Config, rootpath=tmp_path, hook=hooks), 2)
+    assert coordinator._resolve_max_workers() == expected
+
+
+@pytest.mark.parametrize("result", [True, "2", 0, -1])
+def test_worker_limit_hook_rejects_other_values(tmp_path: Path, result: object) -> None:
+    from pytest_parallel.coordinator import Coordinator
+
+    hooks = SimpleNamespace(pytest_parallel_max_workers=Mock(return_value=result))
+    coordinator = Coordinator(Mock(spec=pytest.Config, rootpath=tmp_path, hook=hooks), 2)
+    with pytest.raises(pytest.UsageError) as error:
+        coordinator._resolve_max_workers()
+    assert str(error.value) == f"pytest_parallel_max_workers must return a positive integer or None, got {result!r}"
+
+
 @pytest.mark.parametrize(
     ("hook", "args"),
     [
