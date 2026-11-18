@@ -244,3 +244,10 @@ reconcile_rejects or complete_events_before_partial or report_event`.
 Run `mutmut run --max-children 1
 'pytest_parallel.coordinator.xǁCoordinatorǁ_handle_report_event__mutmut_*'`.
 For the original tests, omit the final keyword alternative.
+
+The [six-scope hosted trial](https://github.com/joshuarli/pytest-parallel/actions/runs/44276369341)
+at `4d29d37` passed all twelve mutation jobs. Both report lanes caught
+all 105 identities. The mutation jobs used 907 runner seconds, with a
+median job time of 89.5 seconds and a longest job of 166 seconds.
+The remaining coordinator lifecycle and loopback scopes are outside
+that passing matrix.
