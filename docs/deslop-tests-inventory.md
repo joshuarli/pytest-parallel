@@ -214,3 +214,14 @@ Select `pytest_parallel.coordinator.xǁCoordinatorǁ_monitor__mutmut_*`,
 and `pytest_parallel.coordinator.xǁCoordinatorǁ_trigger_global_stop__mutmut_*`.
 Compare the selected keys and outcomes in
 `mutants/src/pytest_parallel/coordinator.py.meta`.
+
+The monitor now uses the optional drain deadline as its sole stop
+state. `None` keeps ordinary polling active. A deadline records the
+one stop request and gives the point at which remaining workers are
+terminated. The previous flag and deadline could represent conflicting
+values even though their assignments always occurred together.
+
+The same three functions at the simplified revision generate 162
+identities, with 111 caught. The stop and cleanup cases and all 212
+ordinary tests pass. The remaining monitor and wider lifecycle audit
+stay open.
