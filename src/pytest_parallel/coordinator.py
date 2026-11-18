@@ -989,11 +989,6 @@ class Coordinator:
                     f"duplicate {when!r} report for {nodeid!r} on worker {state.worker_id}"
                 )
                 return
-            if when == "setup" and active.reports:
-                state.protocol_errors.append(
-                    f"out-of-order setup report for {nodeid!r} on worker {state.worker_id}"
-                )
-                return
             if when == "call":
                 setup_rep = active.reports.get("setup")
                 if setup_rep is None or "teardown" in active.reports or not setup_rep.passed:
@@ -1008,7 +1003,6 @@ class Coordinator:
                 return
             active.reports[when] = report
 
-        state.last_nodeid = nodeid
         active.pending_reports.append(report)
         if report.failed and not hasattr(report, "wasxfail") and nodeid not in state.failed_nodeids:
             state.failed_nodeids.append(nodeid)

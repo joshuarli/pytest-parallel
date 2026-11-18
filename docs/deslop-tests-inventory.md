@@ -166,3 +166,24 @@ SHA-256 is
 `8e518a881812ad21c192ca7c63e6b0efb8c789d125439dba0f36ae388930af87`.
 The consumer used FFmpeg 9.0.2 and a task-local native build of fio
 3.42. No package was published.
+
+## Coordinator report events
+
+Sixteen protocol cases exercise report ordering, node identity, duration,
+worker state, subtest phase, location, and distinct failure accounting.
+With coordinator blob `17d9d77c762d0027728ae5a59edf6c9e78f0e31e`,
+the same 111 native mutations went from 68 to 107 caught. Setup can be
+neither duplicate nor preceded by call or teardown, and a matching
+report repeats the node ID already recorded by the start event. Removing
+those redundant operations leaves 105 mutations, all caught, in blob
+`c3a1fd9555f8e50844a2e913fca601e2deb8a794`. All 207 ordinary tests
+and lint passed.
+
+Use the serial mutmut 3.8.1 setup above with
+`only_mutate = ["src/pytest_parallel/coordinator.py"]`, select
+`tests/test_p0_correctness.py`, and set the pytest keyword filter to
+`protocol_validation or missing_call_report or incomplete_finish or
+reconcile_rejects or complete_events_before_partial or report_event`.
+Run `mutmut run --max-children 1
+'pytest_parallel.coordinator.xǁCoordinatorǁ_handle_report_event__mutmut_*'`.
+For the original tests, omit the final keyword alternative.
