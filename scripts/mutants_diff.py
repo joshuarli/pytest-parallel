@@ -72,7 +72,7 @@ TESTS = {
     "src/pytest_parallel/scheduling.py": ["tests/test_partition.py"],
     "src/pytest_parallel/worker.py": [
         "tests/test_p0_correctness.py", "-k",
-        "worker_report_observer or worker_stream_replays_collection_failure or phase_outcomes_and_junitxml",
+        "worker_report_observer_jsonl_from_pytest_hooks or worker_report_observer_keeps_missing_collection_detail_null",
     ],
 }
 OPTIONS_SOURCE_SHA256 = "35a04145a9aee49dd0680ff7c5b1adf4ce3a325b9ad8ca637a3c7300cbb5f420"
