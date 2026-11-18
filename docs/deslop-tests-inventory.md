@@ -157,3 +157,12 @@ ordinary setup, call and teardown when applicable.
 
 Run `uv run pytest --serial -q tests/test_p0_correctness.py -k
 'replays_unittest_subtest or replays_a_subtest'` and `make test lint`.
+
+The three focused cases passed with the installed wheel on pytest 9.0.0
+and 9.2.0. All 191 ordinary tests and lint passed. In Toolbox at
+`2a39b3c`, the wheel from `3e513b8` passed 749 tests in the ordinary
+parallel invocation with one skip and five fio subtests. The wheel's
+SHA-256 is
+`8e518a881812ad21c192ca7c63e6b0efb8c789d125439dba0f36ae388930af87`.
+The consumer used FFmpeg 9.0.2 and a task-local native build of fio
+3.42. No package was published.
