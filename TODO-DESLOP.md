@@ -7,6 +7,8 @@ Ground evidence at 4968f8e: the plan fixture has a local pytest.ini; PR 15 CI pa
 
 ## Report
 
+Hook errors (DSLP-6) were repaired in [#22](https://github.com/joshuarli/pytest-parallel/pull/22). The [installed-wheel evidence](docs/deslop-hook-errors.md) verifies that exceptions propagate before a plan or worker starts.
+
 Event-stream scenario: bounded coordinator intake and dispatch mutation, real-worker stream witnesses, and the invalid UTF-8 fix are recorded in [event-stream evidence](docs/deslop-event-stream.md). Broader DSLP-4 remains open.
 
 Scheduling scenario: serial mutmut 3.8.1 selected 276 identities, with 264 killed, 11 equivalent survivors and one confirmed timeout; mutated-module activation and the negative control are recorded in [scheduling evidence](docs/deslop-scheduling-tests.md). DSLP-4, the broader Tests audit and whole-change CI remain open.
@@ -45,9 +47,9 @@ The manifest and lockfile pin the same tools; no prior scratch file is needed.
 ### DSLP-4 · P2 · Tests: coverage, boundary gaps, mutation
 
 - **Area:** deslop · tests
-- **Where:** test suites and CI
-- **Problem:** Native worker coverage is established in docs/deslop-coverage.md. The complete scheduling component now has a serial mutmut scenario with activation and survivor dispositions in docs/deslop-scheduling-tests.md. The broader test audit, other components, and whole-change CI qualification remain open.
-- **Recommendation:** Complete the broader Tests step and qualify a classified whole-change CI lane; keep scheduling results scoped to their recorded source.
+- **Where:** src/pytest_parallel, test suites, Makefile and hosted CI
+- **Problem:** docs/deslop-tests-inventory.md names protected plugin, scheduling, supervision, event, reporting and local socket boundaries with current evidence and gaps. make coverage verifies both worker profiles. The whole-change gate and its hosted controls remain open.
+- **Recommendation:** Reconcile the named regions to current source, fill the remaining witnesses and retain the serial mutation union. Establish paired suite cost and exercise the complete workflow controls in docs/deslop-tests-inventory.md.
 - **Fix with:** deslop
 - **Effort:** M
 
@@ -59,16 +61,3 @@ The manifest and lockfile pin the same tools; no prior scratch file is needed.
 - **Recommendation:** Run the deslop Dead code step. Accept: tools clean or allowlisted with reasons; walk-backs filed as Needs owner tickets.
 - **Fix with:** deslop
 - **Effort:** M
-
-
-### DSLP-6 · P2 · Scheduling hook AttributeErrors silently discard customization
-
-- **Status:** fixed; see [hook error evidence](docs/deslop-hook-errors.md).
-
-- **Area:** scheduling hooks
-- **Where:** src/pytest_parallel/coordinator.py:249, src/pytest_parallel/coordinator.py:258, src/pytest_parallel/coordinator.py:278
-- **Problem:** The handler catches AttributeError raised by hook implementations as if the hook were absent. A broken affinity hook can silently split files across workers, a failed pin can move a shard, and a failed weight silently uses test count. Built wheel repro: create a pytest.ini containing [pytest], test_a.py and test_b.py each containing one passing test, and conftest.py defining `def pytest_parallel_file_groups(path, items): raise AttributeError("hook failed")`; run `PYTHONPATH="$PWD/.work/tmp/diagnose-wheel-unpacked" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -p pytest_parallel.plugin -j 2 --parallel-plan=json .work/tmp/diagnose-hook`. Actual exit 0, two units on separate workers, no diagnostic; expected a nonzero exit reporting the hook failure and no plan. With analogous weight and shard-worker hooks the same command exited 0 with default weights and no pins; replacing AttributeError with ValueError exited 3 with the diagnostic and empty stdout. Wheel was built with `uv build --wheel --out-dir .work/tmp/diagnose-wheel` and unpacked into the PYTHONPATH directory.
-- **Recommendation:** Let exceptions raised during hook execution propagate; detect absent hook attributes outside the call. Exercise each hook through the installed product and assert no plan or workers after the error.
-- **Fix with:** error-model
-- **Effort:** S
-
