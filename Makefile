@@ -1,4 +1,4 @@
-.PHONY: build check lint test coverage mutants-scheduling preflight bump publish publish-mypypi
+.PHONY: build check lint test coverage mutants-diff mutants-scheduling preflight bump publish publish-mypypi
 
 BUMP ?= minor
 
@@ -54,3 +54,8 @@ coverage:
 
 mutants-scheduling:
 	uv run python scripts/mutants_scheduling.py
+
+mutants-diff:
+	@set -- "$${BASE:-origin/main}"; \
+	if [ -n "$${MUTMUT_SHARD:-}" ]; then set -- --shard "$$MUTMUT_SHARD" "$$@"; fi; \
+	uv run --no-sync python scripts/mutants_diff.py "$$@"

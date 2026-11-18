@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, ci/deslop-mutation-gate]
 
 permissions:
   contents: read
@@ -53,3 +53,38 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           uv run pytest tests/test_campaign.py -q --serial -k "start_methods or collection_mismatch"
+
+  mutants:
+    name: Mutation trial (${{ matrix.os }}, ${{ matrix.shard }})
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 24
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04-arm, xcode-27]
+        shard: [plugin, scheduling, coordinator-plan, coordinator-pins, coordinator-report, worker]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Install pinned mutation tools
+        run: |
+          mkdir -p .work/tmp
+          printf '%s\n' '.work/' >> "$(git rev-parse --git-path info/exclude)"
+          export TMPDIR="$PWD/.work/tmp"
+          uv sync --locked
+          uv pip install --default-index https://pypi.17166969.xyz/current/simple/ mutmut==3.8.1
+      - name: Run the protected selection
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          MUTMUT_SHARD: ${{ matrix.shard }}
+        run: |
+          export TMPDIR="$PWD/.work/tmp"
+          export MUTMUT="$PWD/.venv/bin/mutmut"
+          BASE="origin/$BASE_REF" make mutants-diff

@@ -140,6 +140,63 @@ Select `pytest_parallel.coordinator.xǁCoordinatorǁ_resolve_pins__mutmut_*`
 and `pytest_parallel.coordinator.xǁCoordinatorǁ_resolve_max_workers__mutmut_*`
 in the same serial run.
 
+## Whole-change gate trial
+
+The trial runs `scripts/mutants_diff.py BASE` on a clean committed
+head with mutmut 3.8.1 in the test environment. Set `MUTMUT` to that
+environment's executable. Use `--plan` to inspect a dirty change or
+`--shard plugin` to execute one lane. Coordinator file planning uses
+`--shard coordinator-plan`, and worker pins and limits use
+`--shard coordinator-pins`. Report validation uses
+`--shard coordinator-report`. A production change to the coordinator
+selects the whole module and includes the event, planning and pin witnesses.
+The gate archives the tested
+revision and runs the existing serial recipes. Unknown paths, missing
+witnesses, empty relevant selections, incomplete results, and budget
+exhaustion fail.
+
+The options shard against `8da30d09` reported 126 caught and the
+one previously dispositioned equivalent. In isolated controls,
+removing the invalid-plan-mode test left 32 ordinary option tests
+passing and reopened `x__parse_plan__mutmut_18`. Adding an
+uncovered branch left 33 ordinary tests passing and exposed
+surviving `_parse_plan` mutations. A mixed-change plan selected
+both the unrelated scheduling module and the protected option scope
+after a test deletion. A docs-only plan reported no relevant changes.
+The [hosted positive](https://github.com/joshuarli/pytest-parallel/actions/runs/44257362822)
+at `80cce01` passed all eight mutation jobs on Linux ARM64 and macOS,
+using 668 total runner seconds, with a longest job of 170 seconds.
+The [uncovered branch](https://github.com/joshuarli/pytest-parallel/pull/34)
+left `_parse_plan` identities 19–22 alive on both platforms. The
+[deletion](https://github.com/joshuarli/pytest-parallel/pull/35) and
+[mixed change](https://github.com/joshuarli/pytest-parallel/pull/37)
+each reopened identity 18 on both platforms. The mixed scheduling
+selection passed. All eight jobs in the
+[documentation control](https://github.com/joshuarli/pytest-parallel/pull/36)
+reported no relevant changes. Ordinary checks passed all four controls.
+
+The standalone scheduling shard accounted for all 276 identities,
+with 264 caught, 11 equivalent and one confirmed timeout. At
+`f320bda` against `4f498ebd`, the file-planning shard caught all
+79 selected identities through this same driver.
+
+The worker shard caught all 60 report identities through `make
+mutants-diff` at `19775d6`. It runs the two in-process report
+observers. An earlier selection also ran child CLI checks in the
+mutation environment, where plugin autoload is disabled. Those
+checks require the normal plugin and remain in the ordinary suite.
+The remaining coordinator and socket selections stay open.
+
+On the first aggregate attempt, `f7c2795` against `8da30d09`
+exhausted 1,200 seconds in the coordinator. It processed 130 of
+559 selected coordinator mutations, with 48 caught and 82 survivors.
+The aggregate never reached the other components. The trial now
+supports distinct module shards and emits partial counts on budget
+exhaustion. The coordinator needs smaller behavioral witnesses,
+followed by repeat measurements for the full supported selection.
+Keep the workflow outside required CI and fleet retention until the
+complete positives and controls pass within the declared budgets.
+
 ## Pytest subtest replay
 
 Pytest 9.2 emits a `SubtestReport` with phase `call` for each native
@@ -187,3 +244,10 @@ reconcile_rejects or complete_events_before_partial or report_event`.
 Run `mutmut run --max-children 1
 'pytest_parallel.coordinator.xǁCoordinatorǁ_handle_report_event__mutmut_*'`.
 For the original tests, omit the final keyword alternative.
+
+The [six-scope hosted trial](https://github.com/joshuarli/pytest-parallel/actions/runs/44276369341)
+at `4d29d37` passed all twelve mutation jobs. Both report lanes caught
+all 105 identities. The mutation jobs used 907 runner seconds, with a
+median job time of 89.5 seconds and a longest job of 166 seconds.
+The remaining coordinator lifecycle and loopback scopes are outside
+that passing matrix.
