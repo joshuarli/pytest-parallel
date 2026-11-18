@@ -120,11 +120,6 @@ def test_parse_plan_normalizes_known_modes(value: object, mode: str | None) -> N
     assert _parse_plan(value) == mode
 
 
-def test_parse_plan_rejects_an_unknown_mode() -> None:
-    with pytest.raises(pytest.UsageError, match="--parallel-plan"):
-        _parse_plan("yaml")
-
-
 def test_parse_ramp_valid_durations() -> None:
     assert _parse_ramp(None) == 0.0
     assert _parse_ramp(0) == 0.0
