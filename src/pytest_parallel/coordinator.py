@@ -258,8 +258,6 @@ class Coordinator:
                 hook_weight = weight_hook(path=file_unit.path, items=list(file_unit.items))
                 if hook_weight is not None:
                     weight = _validate_hook_weight(hook_weight, file_unit.path)
-                    if not file_unit.items and weight != weight:
-                        raise pytest.UsageError(f"pytest_parallel_file_weight for {file_unit.path} is invalid")
             file_unit.weight = weight
         return merge_units(files)
 

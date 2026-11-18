@@ -123,6 +123,54 @@ def test_missing_hooks_use_defaults(tmp_path: Path) -> None:
     assert coordinator._resolve_pins(units, 2) == {}
 
 
+def test_file_hooks_group_weight_and_preserve_items(tmp_path: Path) -> None:
+    from pytest_parallel.coordinator import Coordinator
+
+    inputs = [
+        _item("a.py::one"), _item("b.py::one"), _item("a.py::two"),
+        _item("c.py::one"), _item("c.py::two"),
+    ]
+    received: list[tuple[str, tuple[str, ...]]] = []
+
+    def groups(path: Path, items: list[Mock]) -> list[list[str]]:
+        received.append((path.name, tuple(item.nodeid for item in items)))
+        items.clear()
+        return [["db"]] if path.name in {"a.py", "b.py"} else []
+
+    hooks = SimpleNamespace(
+        pytest_parallel_file_groups=groups,
+        pytest_parallel_file_weight=lambda path, items: 4.0 if path.name == "a.py" else None,
+    )
+    coordinator = Coordinator(Mock(spec=pytest.Config, rootpath=tmp_path, hook=hooks), 2)
+
+    units = coordinator._build_units(inputs)
+
+    assert received == [
+        ("a.py", ("a.py::one", "a.py::two")),
+        ("b.py", ("b.py::one",)),
+        ("c.py", ("c.py::one", "c.py::two")),
+    ]
+    assert [(tuple(path.name for path in unit.files), unit.groups, unit.weight) for unit in units] == [
+        (("a.py", "b.py"), ("db",), 5.0),
+        (("c.py",), (), 2.0),
+    ]
+    assert [[item.nodeid for item in unit.items] for unit in units] == [
+        ["a.py::one", "a.py::two", "b.py::one"],
+        ["c.py::one", "c.py::two"],
+    ]
+
+
+@pytest.mark.parametrize("weight", [0.0, float("nan"), float("inf")])
+def test_file_hook_rejects_nonpositive_or_nonfinite_weight(tmp_path: Path, weight: float) -> None:
+    from pytest_parallel.coordinator import Coordinator
+
+    hooks = SimpleNamespace(pytest_parallel_file_weight=lambda path, items: weight)
+    coordinator = Coordinator(Mock(spec=pytest.Config, rootpath=tmp_path, hook=hooks), 2)
+
+    with pytest.raises(pytest.UsageError, match="positive finite number"):
+        coordinator._build_units([_item("a.py::one")])
+
+
 @pytest.mark.parametrize(
     ("hook", "args"),
     [
