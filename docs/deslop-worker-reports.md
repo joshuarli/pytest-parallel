@@ -1,5 +1,19 @@
 # Worker report emission scenario
 
+At `c07dceb`, the worker source still has blob `2e239c0`. A collection
+report without a diagnostic now has a direct JSONL witness requiring
+`longrepr` to be null. The two direct observer tests caught all 60
+identities in the same three methods with mutmut 3.8.1, pytest 9.2.0 and
+CPython 3.15.2 on macOS arm64. No selected identity survived or timed out.
+Activating `pytest_collectreport__mutmut_15` in generated source made the
+new assertion fail with the string `"None"` in place of null.
+
+To repeat the two-observer run, use the scratch recipe below with
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` and the test selection
+`-k "worker_report_observer_jsonl_from_pytest_hooks or worker_report_observer_keeps_missing_collection_detail_null"`.
+The full local suite passed 157 tests. Other worker decisions and the
+whole-change gate remain open.
+
 This local DSLP-4 scenario covers `ResultReporter._serialize_report`,
 `pytest_collectreport`, and `pytest_runtest_logreport` in `worker.py`. The
 runtime source is unchanged from base `e49e7fb1080a8766c28c2257b8261966aef8dcd0`

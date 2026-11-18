@@ -863,3 +863,20 @@ def test_worker_report_observer_jsonl_from_pytest_hooks(
     assert errors[0]["outcome"] == "failed"
     assert "collection witness" in errors[0]["longrepr"]
     assert errors[0]["report"]["$report_type"] == "CollectReport"
+
+
+def test_worker_report_observer_keeps_missing_collection_detail_null(tmp_path: Path) -> None:
+    from pytest_parallel.worker import ResultReporter
+
+    stream = tmp_path / "events.jsonl"
+    report = pytest.CollectReport("tests/test_example.py", "failed", None, None)
+
+    ResultReporter(str(stream)).pytest_collectreport(report)
+
+    event, = [json.loads(line) for line in stream.read_text().splitlines()]
+    assert (event["type"], event["nodeid"], event["outcome"], event["longrepr"]) == (
+        "collect_report",
+        "tests/test_example.py",
+        "failed",
+        None,
+    )
