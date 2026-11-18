@@ -108,3 +108,11 @@ Use the same serial mutmut setup as the options scenario, setting
 Run `mutmut run --max-children 1 'pytest_parallel.coordinator.xǁCoordinatorǁ_build_units__mutmut_*'`
 with pytest plugin autoload disabled. The ordinary suite passed all
 173 tests on macOS arm64.
+
+A follow-up at `8197c593` caught all 79 of those same identities with
+the same instrumented source blob. The test verifies that the path's
+scoped hook receives an absolute path while its public arguments and
+result use the root-relative path. A marker on one file and a hook on
+another join the files into one unit. The hook assertions also cover
+item copies, invalid group names and diagnostics that identify the
+source path. The command above selects these cases.
