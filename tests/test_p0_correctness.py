@@ -34,6 +34,65 @@ def _run_pytest(args: list[str], cwd: Path | None = None, env: dict[str, str] | 
     )
 
 
+@pytest.mark.parametrize("failure", [False, True])
+def test_worker_replays_unittest_subtest_reports(tmp_path: Path, failure: bool) -> None:
+    (tmp_path / "conftest.py").write_text(
+        "import json, os, pytest\n"
+        "def pytest_runtest_logreport(report):\n"
+        "    if os.environ.get('PYTEST_PARALLEL_WORKER_ID') or not report.nodeid.endswith('::test_cases'):\n"
+        "        return\n"
+        "    with open('reports.jsonl', 'a') as stream:\n"
+        "        case = report.context.kwargs['case'] if isinstance(report, pytest.SubtestReport) else None\n"
+        "        stream.write(json.dumps([report.when, report.outcome, case]) + '\\n')\n",
+        encoding="utf-8",
+    )
+    test_file = tmp_path / "test_subtests.py"
+    test_file.write_text(
+        "import unittest\n"
+        "class TestSubtests(unittest.TestCase):\n"
+        "    def test_cases(self):\n"
+        "        with self.subTest(case='first'):\n"
+        "            self.assertTrue(True)\n"
+        "        with self.subTest(case='second'):\n"
+        f"            self.assertFalse({failure})\n"
+        "    def test_following(self):\n"
+        "        self.assertTrue(True)\n",
+        encoding="utf-8",
+    )
+
+    result = _run_pytest([str(test_file), "-j", "1", "-vv"], cwd=tmp_path)
+
+    expected = pytest.ExitCode.TESTS_FAILED if failure else pytest.ExitCode.OK
+    assert result.returncode == expected, result.stdout
+    assert "duplicate 'call' report" not in result.stdout, result.stdout
+    assert "TestSubtests::test_following PASSED" in result.stdout, result.stdout
+    reports = [json.loads(line) for line in (tmp_path / "reports.jsonl").read_text().splitlines()]
+    assert [when for when, _, _ in reports] == ["setup", "call", "call", "call", "teardown"]
+    assert reports[1][1] == "passed"
+    assert reports[2][1] == ("failed" if failure else "passed")
+    assert "first" in reports[1][2]
+    assert "second" in reports[2][2]
+    assert all(reports[index][2] is None for index in (0, 3, 4))
+
+
+def test_worker_replays_a_subtest_before_reporting_a_crash(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_subtest_crash.py"
+    test_file.write_text(
+        "import os\n"
+        "def test_crash(subtests):\n"
+        "    with subtests.test('finished subtest'):\n"
+        "        pass\n"
+        "    os._exit(7)\n",
+        encoding="utf-8",
+    )
+
+    result = _run_pytest([str(test_file), "-j", "1", "-vv"], cwd=tmp_path)
+
+    assert result.returncode == pytest.ExitCode.TESTS_FAILED, result.stdout
+    assert "SUBPASSED[finished subtest]" in result.stdout, result.stdout
+    assert "exit code 7" in result.stdout, result.stdout
+
+
 def test_worker_os_exit_1_cannot_produce_false_success(tmp_path: Path) -> None:
     test_file = tmp_path / "test_crash.py"
     test_file.write_text(
