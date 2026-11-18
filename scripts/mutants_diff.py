@@ -212,6 +212,7 @@ def run_scope(
 ) -> bool:
     env = dict(os.environ, PYTHONPATH=str(directory / "src"), TMPDIR=str(scratch))
     env.pop("MUTANT_UNDER_TEST", None)
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     config = directory / "pyproject.toml"
     contents = config.read_text(encoding="utf-8") + (
         '\n[tool.mutmut]\nsource_paths = ["src"]\n'
