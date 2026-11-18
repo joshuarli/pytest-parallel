@@ -195,3 +195,51 @@ exhaustion. The coordinator needs smaller behavioral witnesses,
 followed by repeat measurements for the full supported selection.
 Keep the workflow outside required CI and fleet retention until the
 complete positives and controls pass within the declared budgets.
+
+## Pytest subtest replay
+
+Pytest 9.2 emits a `SubtestReport` with phase `call` for each native
+`unittest.TestCase.subTest` and then sends the ordinary call report.
+The released 0.4.0 and a wheel built from `c260153` treated these as
+duplicate primary phases. The Toolbox consumer reproduced the error
+in native fio tests that passed in serial.
+
+The coordinator now deserializes the public pytest report type before
+validating ordinary phase slots. It buffers subtests in report order
+and replays them through the same hook, including reports received
+before a worker crash. Tests verify passing and failing subtests and
+the ensuing regular phase reports. The phase checks still require
+ordinary setup, call and teardown when applicable.
+
+Run `uv run pytest --serial -q tests/test_p0_correctness.py -k
+'replays_unittest_subtest or replays_a_subtest'` and `make test lint`.
+
+The three focused cases passed with the installed wheel on pytest 9.0.0
+and 9.2.0. All 191 ordinary tests and lint passed. In Toolbox at
+`2a39b3c`, the wheel from `3e513b8` passed 749 tests in the ordinary
+parallel invocation with one skip and five fio subtests. The wheel's
+SHA-256 is
+`8e518a881812ad21c192ca7c63e6b0efb8c789d125439dba0f36ae388930af87`.
+The consumer used FFmpeg 9.0.2 and a task-local native build of fio
+3.42. No package was published.
+
+## Coordinator report events
+
+Sixteen protocol cases exercise report ordering, node identity, duration,
+worker state, subtest phase, location, and distinct failure accounting.
+With coordinator blob `17d9d77c762d0027728ae5a59edf6c9e78f0e31e`,
+the same 111 native mutations went from 68 to 107 caught. Setup can be
+neither duplicate nor preceded by call or teardown, and a matching
+report repeats the node ID already recorded by the start event. Removing
+those redundant operations leaves 105 mutations, all caught, in blob
+`c3a1fd9555f8e50844a2e913fca601e2deb8a794`. All 207 ordinary tests
+and lint passed.
+
+Use the serial mutmut 3.8.1 setup above with
+`only_mutate = ["src/pytest_parallel/coordinator.py"]`, select
+`tests/test_p0_correctness.py`, and set the pytest keyword filter to
+`protocol_validation or missing_call_report or incomplete_finish or
+reconcile_rejects or complete_events_before_partial or report_event`.
+Run `mutmut run --max-children 1
+'pytest_parallel.coordinator.xǁCoordinatorǁ_handle_report_event__mutmut_*'`.
+For the original tests, omit the final keyword alternative.

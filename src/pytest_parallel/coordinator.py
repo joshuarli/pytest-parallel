@@ -39,7 +39,6 @@ class PlannedWorker(NamedTuple):
 
 _VALID_OUTCOMES: frozenset[str] = frozenset({"passed", "failed", "skipped"})
 _VALID_PHASES: frozenset[str] = frozenset({"setup", "call", "teardown"})
-_PHASE_ORDER: tuple[ReportPhase, ...] = ("setup", "call", "teardown")
 
 _WORKER_EXECUTION_HOOKS: frozenset[str] = frozenset(
     {
@@ -125,6 +124,7 @@ class ActiveTestState:
     nodeid: str
     location: tuple[str, int | None, str]
     reports: dict[str, pytest.TestReport] = field(default_factory=dict)
+    pending_reports: list[pytest.TestReport] = field(default_factory=list)
 
 
 @dataclass
@@ -970,29 +970,6 @@ class Coordinator:
             return
 
         active = state.current_test
-        if when in active.reports:
-            state.protocol_errors.append(
-                f"duplicate {when!r} report for {nodeid!r} on worker {state.worker_id}"
-            )
-            return
-        if when == "setup" and active.reports:
-            state.protocol_errors.append(
-                f"out-of-order setup report for {nodeid!r} on worker {state.worker_id}"
-            )
-            return
-        if when == "call":
-            setup_rep = active.reports.get("setup")
-            if setup_rep is None or "teardown" in active.reports or not setup_rep.passed:
-                state.protocol_errors.append(
-                    f"invalid call phase transition for {nodeid!r} on worker {state.worker_id}"
-                )
-                return
-        if when == "teardown" and "setup" not in active.reports:
-            state.protocol_errors.append(
-                f"teardown report before setup for {nodeid!r} on worker {state.worker_id}"
-            )
-            return
-
         item = items_by_nodeid.get(nodeid)
         report = self._deserialize_test_report(event, item, active.location)
         if report is None:
@@ -1000,9 +977,33 @@ class Coordinator:
                 f"invalid serialized TestReport for {nodeid!r} ({when}) on worker {state.worker_id}"
             )
             return
+        if isinstance(report, pytest.SubtestReport):
+            if when != "call" or "teardown" in active.reports:
+                state.protocol_errors.append(
+                    f"invalid subtest report for {nodeid!r} ({when}) on worker {state.worker_id}"
+                )
+                return
+        else:
+            if when in active.reports:
+                state.protocol_errors.append(
+                    f"duplicate {when!r} report for {nodeid!r} on worker {state.worker_id}"
+                )
+                return
+            if when == "call":
+                setup_rep = active.reports.get("setup")
+                if setup_rep is None or "teardown" in active.reports or not setup_rep.passed:
+                    state.protocol_errors.append(
+                        f"invalid call phase transition for {nodeid!r} on worker {state.worker_id}"
+                    )
+                    return
+            if when == "teardown" and "setup" not in active.reports:
+                state.protocol_errors.append(
+                    f"teardown report before setup for {nodeid!r} on worker {state.worker_id}"
+                )
+                return
+            active.reports[when] = report
 
-        state.last_nodeid = nodeid
-        active.reports[when] = report
+        active.pending_reports.append(report)
         if report.failed and not hasattr(report, "wasxfail") and nodeid not in state.failed_nodeids:
             state.failed_nodeids.append(nodeid)
             self._failed += 1
@@ -1058,10 +1059,8 @@ class Coordinator:
         if isinstance(uncaptured_stdout, str) and uncaptured_stdout:
             terminal.write(uncaptured_stdout)
             terminal.flush()
-        for phase in _PHASE_ORDER:
-            phase_report = active.reports.get(phase)
-            if phase_report is not None:
-                session.config.hook.pytest_runtest_logreport(report=phase_report)
+        for report in active.pending_reports:
+            session.config.hook.pytest_runtest_logreport(report=report)
         session.config.hook.pytest_runtest_logfinish(nodeid=active.nodeid, location=active.location)
 
     def _handle_warning_event(
@@ -1212,9 +1211,8 @@ class Coordinator:
             active = state.current_test
             state.current_test = None
             session.config.hook.pytest_runtest_logstart(nodeid=active.nodeid, location=active.location)
-            for phase in _PHASE_ORDER:
-                if phase in active.reports:
-                    session.config.hook.pytest_runtest_logreport(report=active.reports[phase])
+            for report in active.pending_reports:
+                session.config.hook.pytest_runtest_logreport(report=report)
             missing_phase: ReportPhase = (
                 "setup"
                 if "setup" not in active.reports

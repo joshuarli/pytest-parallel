@@ -7,7 +7,7 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -32,6 +32,65 @@ def _run_pytest(args: list[str], cwd: Path | None = None, env: dict[str, str] | 
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_worker_replays_unittest_subtest_reports(tmp_path: Path, failure: bool) -> None:
+    (tmp_path / "conftest.py").write_text(
+        "import json, os, pytest\n"
+        "def pytest_runtest_logreport(report):\n"
+        "    if os.environ.get('PYTEST_PARALLEL_WORKER_ID') or not report.nodeid.endswith('::test_cases'):\n"
+        "        return\n"
+        "    with open('reports.jsonl', 'a') as stream:\n"
+        "        case = report.context.kwargs['case'] if isinstance(report, pytest.SubtestReport) else None\n"
+        "        stream.write(json.dumps([report.when, report.outcome, case]) + '\\n')\n",
+        encoding="utf-8",
+    )
+    test_file = tmp_path / "test_subtests.py"
+    test_file.write_text(
+        "import unittest\n"
+        "class TestSubtests(unittest.TestCase):\n"
+        "    def test_cases(self):\n"
+        "        with self.subTest(case='first'):\n"
+        "            self.assertTrue(True)\n"
+        "        with self.subTest(case='second'):\n"
+        f"            self.assertFalse({failure})\n"
+        "    def test_following(self):\n"
+        "        self.assertTrue(True)\n",
+        encoding="utf-8",
+    )
+
+    result = _run_pytest([str(test_file), "-j", "1", "-vv"], cwd=tmp_path)
+
+    expected = pytest.ExitCode.TESTS_FAILED if failure else pytest.ExitCode.OK
+    assert result.returncode == expected, result.stdout
+    assert "duplicate 'call' report" not in result.stdout, result.stdout
+    assert "TestSubtests::test_following PASSED" in result.stdout, result.stdout
+    reports = [json.loads(line) for line in (tmp_path / "reports.jsonl").read_text().splitlines()]
+    assert [when for when, _, _ in reports] == ["setup", "call", "call", "call", "teardown"]
+    assert reports[1][1] == "passed"
+    assert reports[2][1] == ("failed" if failure else "passed")
+    assert "first" in reports[1][2]
+    assert "second" in reports[2][2]
+    assert all(reports[index][2] is None for index in (0, 3, 4))
+
+
+def test_worker_replays_a_subtest_before_reporting_a_crash(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_subtest_crash.py"
+    test_file.write_text(
+        "import os\n"
+        "def test_crash(subtests):\n"
+        "    with subtests.test('finished subtest'):\n"
+        "        pass\n"
+        "    os._exit(7)\n",
+        encoding="utf-8",
+    )
+
+    result = _run_pytest([str(test_file), "-j", "1", "-vv"], cwd=tmp_path)
+
+    assert result.returncode == pytest.ExitCode.TESTS_FAILED, result.stdout
+    assert "SUBPASSED[finished subtest]" in result.stdout, result.stdout
+    assert "exit code 7" in result.stdout, result.stdout
 
 
 def test_worker_os_exit_1_cannot_produce_false_success(tmp_path: Path) -> None:
@@ -373,6 +432,96 @@ def _make_harness(tmp_path: Path, assigned: list[str]) -> tuple[Coordinator, Any
     coordinator = Coordinator(cast(Any, config), 1)
     coordinator._work_dir = tmp_path
     return coordinator, state, session, items_by_nodeid
+
+
+@pytest.mark.parametrize(
+    ("prior_phases", "fields", "error"),
+    [
+        ((), {"nodeid": ""}, "invalid report nodeid from worker 0"),
+        ((), {"nodeid": 9}, "invalid report nodeid from worker 0"),
+        ((), {"nodeid": "missing.py::test"}, "unexpected report for unassigned test 'missing.py::test' on worker 0"),
+        ((), {"nodeid": "b.py::test"}, "report for 'b.py::test' (setup) without matching active test on worker 0"),
+        ((), {"duration": True}, "invalid report duration True for 'a.py::test' on worker 0"),
+        ((), {"duration": "short"}, "invalid report duration 'short' for 'a.py::test' on worker 0"),
+        ((), {"duration": float("inf")}, "invalid report duration inf for 'a.py::test' on worker 0"),
+        ((), {"when": "teardown"}, "teardown report before setup for 'a.py::test' on worker 0"),
+        ((), {"report": {}}, "invalid serialized TestReport for 'a.py::test' (setup) on worker 0"),
+        (("setup",), {}, "duplicate 'setup' report for 'a.py::test' on worker 0"),
+        (("setup", "teardown"), {"when": "call"}, "invalid call phase transition for 'a.py::test' on worker 0"),
+    ],
+)
+def test_report_event_rejections(
+    tmp_path: Path, prior_phases: tuple[str, ...], fields: dict[str, object], error: str,
+) -> None:
+    owner = "a.py::test"
+    coordinator, state, _, items = _make_harness(tmp_path, [owner, "b.py::test"])
+    coordinator._handle_test_start_event(state, {"nodeid": owner}, items)
+    report = {"nodeid": owner, "when": "setup", "outcome": "passed", "duration": 0}
+    for phase in prior_phases:
+        coordinator._handle_report_event(state, {**report, "when": phase}, items)
+    coordinator._handle_report_event(state, report | fields, items)
+    assert state.protocol_errors == [error]
+    assert len(state.current_test.pending_reports) == len(prior_phases)
+
+
+def test_report_event_without_active_test(tmp_path: Path) -> None:
+    nodeid = "a.py::test"
+    coordinator, state, _, items = _make_harness(tmp_path, [nodeid])
+    coordinator._handle_report_event(state, {"nodeid": nodeid, "when": "setup", "outcome": "passed", "duration": 0}, items)
+    assert state.protocol_errors == ["report for 'a.py::test' (setup) without matching active test on worker 0"]
+
+
+@pytest.mark.parametrize(("when", "after_teardown"), [("call", False), ("setup", False), ("call", True)])
+def test_report_event_admits_subtests_only_during_an_active_phase(
+    tmp_path: Path, when: Literal["call", "setup"], after_teardown: bool,
+) -> None:
+    nodeid = "a.py::test"
+    coordinator, state, session, items = _make_harness(tmp_path, [nodeid])
+    coordinator._handle_test_start_event(state, {"nodeid": nodeid}, items)
+    payload = {"nodeid": nodeid, "outcome": "passed", "duration": 0}
+    coordinator._handle_report_event(state, {**payload, "when": "setup"}, items)
+    if after_teardown:
+        coordinator._handle_report_event(state, {**payload, "when": "teardown"}, items)
+    subtest = pytest.SubtestReport(
+        nodeid=nodeid, location=items[nodeid].location, keywords={}, outcome="passed", longrepr=None, when=when,
+    )
+    session.config.hook.pytest_report_from_serializable.return_value = subtest
+    coordinator._handle_report_event(state, {**payload, "when": when, "report": {}}, items)
+
+    if when == "call" and not after_teardown:
+        assert state.protocol_errors == []
+        assert state.current_test.pending_reports[-1] is subtest
+        assert list(state.current_test.reports) == ["setup"]
+    else:
+        assert state.protocol_errors == [f"invalid subtest report for {nodeid!r} ({when}) on worker 0"]
+        assert subtest not in state.current_test.pending_reports
+
+
+def test_report_events_preserve_locations_and_count_failures_once(tmp_path: Path) -> None:
+    ordinary, expected, other = "a.py::test", "b.py::test", "c.py::test"
+    coordinator, state, session, items = _make_harness(tmp_path, [ordinary, expected, other])
+    locations = [("worker-a.py", 12, "first"), ("worker-b.py", 18, "second"), ("worker-c.py", 21, "third")]
+    for nodeid, location in zip((ordinary, expected, other), locations, strict=True):
+        known = {} if nodeid == other else items
+        coordinator._handle_test_start_event(state, {"nodeid": nodeid, "location": list(location)}, known)
+        event = {"nodeid": nodeid, "duration": 0}
+        coordinator._handle_report_event(state, event | {"when": "setup", "outcome": "passed"}, known)
+        call = event | {"when": "call", "outcome": "failed"}
+        if nodeid == expected:
+            call["wasxfail"] = "expected failure"
+        coordinator._handle_report_event(state, call, known)
+        outcome = "failed" if nodeid == ordinary else "passed"
+        coordinator._handle_report_event(state, event | {"when": "teardown", "outcome": outcome}, known)
+        coordinator._handle_test_finish_event(state, {"nodeid": nodeid}, session, Mock())
+
+    assert not state.protocol_errors
+    assert state.failed_nodeids == [ordinary, other]
+    assert coordinator._failed_nodeids == [ordinary, other]
+    assert coordinator._failed == 2
+    replayed = [call.kwargs["report"] for call in session.config.hook.pytest_runtest_logreport.call_args_list]
+    expected_locations = [items[ordinary].location] * 3 + [items[expected].location] * 3 + [locations[-1]] * 3
+    assert [report.location for report in replayed] == expected_locations
+    assert [report.when for report in replayed] == ["setup", "call", "teardown"] * 3
 
 
 def test_incomplete_finish_clears_active_test(tmp_path: Path) -> None:
