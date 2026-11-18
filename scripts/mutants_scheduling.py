@@ -24,7 +24,7 @@ EQUIVALENT = {
     'x_plan_dict__mutmut_56',
 }
 DEADLINE = time.monotonic() + 1200
-SOURCE_SHA256 = '29078d9c9dc0146460a26150bd3c0a490305835ed95fce6cb0bbf44480d7faff'
+SOURCE_SHA256 = '6d9cdc14ea746f02fbfe899eb040ebdd6e5caf7cf6527b450dbb3fd93acc5489'
 
 
 def run(args: list[str], cwd: Path, env: dict[str, str], *, capture: bool = False) -> str:

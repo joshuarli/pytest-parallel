@@ -51,7 +51,7 @@ def validate_weight(value: object, path: Path) -> float:
             f"pytest_parallel_file_weight for {path} must return a positive finite number or None, got {value!r}"
         )
     weight = float(value)
-    if not math.isfinite(weight) or weight <= 0.0:
+    if weight <= 0.0 or not math.isfinite(weight):
         raise pytest.UsageError(
             f"pytest_parallel_file_weight for {path} must return a positive finite number or None, got {value!r}"
         )
