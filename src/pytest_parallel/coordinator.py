@@ -669,21 +669,19 @@ class Coordinator:
 
         try:
             alive = set(worker_states.keys())
-            global_stop_requested = False
             drain_deadline: float | None = None
 
             while alive:
                 for index in list(alive):
                     state = worker_states[index]
                     self._read_worker_events(state, items_by_nodeid, session, terminal, final=False)
-                    if (session.shouldfail or session.shouldstop) and not global_stop_requested:
-                        global_stop_requested = True
+                    if (session.shouldfail or session.shouldstop) and drain_deadline is None:
                         drain_deadline = time.monotonic() + _STOP_DRAIN_TIMEOUT
                         self._trigger_global_stop(stop_path, worker_states)
                     if not state.process.is_alive():
                         alive.discard(index)
                 if alive:
-                    if global_stop_requested and drain_deadline is not None and time.monotonic() >= drain_deadline:
+                    if drain_deadline is not None and time.monotonic() >= drain_deadline:
                         self._terminate_live_workers(workers)
                         alive.clear()
                     else:
