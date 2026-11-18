@@ -262,16 +262,13 @@ class Coordinator:
         return merge_units(files)
 
     def _resolve_pins(self, units: Sequence[Unit], num_workers: int, session: Any | None = None) -> dict[int, int]:
-        hook = getattr(self.config, "hook", None)
         pins: dict[int, int] = {}
-        caller = getattr(hook, "pytest_parallel_shard_worker", None) if hook is not None else None
+        caller = getattr(self.config.hook, "pytest_parallel_shard_worker", None)
         if caller is None:
             return pins
         for idx, unit in enumerate(units):
             shard = unit.shard()
             results = self._shard_worker_results(caller, session, unit, num_workers)
-            if not isinstance(results, list):
-                results = [results]
             requested: set[int] = set()
             for result in results:
                 if result is None:

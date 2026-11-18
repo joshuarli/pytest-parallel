@@ -117,6 +117,29 @@ another join the files into one unit. The hook assertions also cover
 item copies, invalid group names and diagnostics that identify the
 source path. The command above selects these cases.
 
+## Worker pins and maximums
+
+Against `4f498ebd`, direct hook witnesses raised detection from nine to
+61 of the same 64 identities across `Coordinator._resolve_pins` and
+`_resolve_max_workers`. The baseline had 47 survivors and eight
+identities with no tests. The new cases exercise repeated and missing
+votes, worker zero, scoped hooks, conflicts, type and range errors,
+and the documented default and positive worker limits.
+
+The three remaining identities target redundant branches. The
+coordinator receives a real `pytest.Config`, whose constructor always
+sets `hook`. A missing shard-worker hook is already handled by
+`getattr` with a default. The internal result method returns a list
+on both routes. Removing those branches leaves 51 identities, all
+caught, in coordinator blob `43d9c9ca7645241ee4beb4d0fdf4d863a1d24313`.
+The ordinary suite passed all 188 tests and lint.
+
+Use the coordinator file-planning setup with `tests/test_campaign.py`
+and `-k 'missing_hooks or shard_pin_votes or worker_limit_hook'`.
+Select `pytest_parallel.coordinator.xǁCoordinatorǁ_resolve_pins__mutmut_*`
+and `pytest_parallel.coordinator.xǁCoordinatorǁ_resolve_max_workers__mutmut_*`
+in the same serial run.
+
 ## Whole-change gate trial
 
 The trial runs `scripts/mutants_diff.py BASE` on a clean committed
