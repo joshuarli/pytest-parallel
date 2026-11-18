@@ -36,3 +36,50 @@ deletion must report both regions and still catch the reopened miss.
 Documentation-only changes must report that no relevant paths changed.
 Confirm timeouts with a longer bound. Capture total runner cost including
 retries and establish paired warm suite cost before closing DSLP-4.
+
+## Option parsing scenario
+
+At `45b45492`, mutmut 3.8.1 selected 127 identities across
+`_parse_plan`, `_parse_jobs`, `_auto_cpu_count`, `_parse_ramp`,
+`_parse_balance` and `_parse_start_method`. The first run caught 82
+with 27 survivors and 18 identities with no tests. The final option
+tests caught 126 of the same 127 with one survivor, no uncovered
+identities and no timeouts. Both runs took about seven seconds on
+macOS arm64 with CPython 3.15.2. The instrumented source blob was
+`5fd554ec87169f9c31cc714c14e785f27c4760b6`.
+
+The sole survivor is `_parse_ramp__mutmut_25`. It changes the diagnostic
+for a `ValueError` in `float(number_text)`. Only a matched decimal,
+infinity or NaN token can reach that conversion. All 770 Unicode decimal
+characters in the pinned Python passed probes for whole, fractional and
+exponent positions. Signed and unsigned special tokens also parsed.
+Overflow returns a nonfinite float and reaches the separate finiteness
+checks. The conversion error is unreachable for the matched grammar.
+
+For reproduction, archive `src`, `tests`, `pyproject.toml` and
+`uv.lock` from the checked revision. Set `TMPDIR` under the scratch
+tree and install the locked pytest and mirrored mutmut 3.8.1. In the
+scratch `pyproject.toml`, configure:
+
+```toml
+[tool.mutmut]
+source_paths = ["src"]
+only_mutate = ["src/pytest_parallel/plugin.py"]
+pytest_add_cli_args = [
+  "-p", "no:parallel", "-k",
+  "not honors_python_cpu_count_override and not worker_count_capped and not invalid_max_workers_hook",
+]
+pytest_add_cli_args_test_selection = ["tests/test_options.py"]
+```
+
+```sh
+set --
+for method in parse_plan parse_jobs auto_cpu_count parse_ramp parse_balance parse_start_method; do
+  set -- "$@" "pytest_parallel.plugin.x__${method}__mutmut_*"
+done
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m mutmut run --max-children 1 "$@"
+```
+
+The mutation run uses direct option tests. Ordinary option testing
+executes the subprocess and pytest startup cases as well. All 36 ordinary
+option tests, Ruff and ty passed locally.
