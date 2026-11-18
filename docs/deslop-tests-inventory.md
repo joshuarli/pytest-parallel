@@ -83,3 +83,34 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m mutmut run --max-children 1 "$@"
 The mutation run uses direct option tests. Ordinary option testing
 executes the subprocess and pytest startup cases as well. All 36 ordinary
 option tests, Ruff and ty passed locally.
+
+## Whole-change gate trial
+
+The trial runs `scripts/mutants_diff.py BASE` on a clean committed
+head with mutmut 3.8.1 in the test environment. Set `MUTMUT` to that
+environment's executable. Use `--plan` to inspect a dirty change or
+`--shard plugin` to execute one lane. The gate archives the tested
+revision and runs the existing serial recipes. Unknown paths, missing
+witnesses, empty relevant selections, incomplete results, and budget
+exhaustion fail.
+
+The options shard against `8da30d09` reported 126 caught and the
+one previously dispositioned equivalent. In isolated controls,
+removing the invalid-plan-mode test left 32 ordinary option tests
+passing and reopened `x__parse_plan__mutmut_18`. Adding an
+uncovered branch left 33 ordinary tests passing and exposed
+surviving `_parse_plan` mutations. A mixed-change plan selected
+both the unrelated scheduling module and the protected option scope
+after a test deletion. A docs-only plan reported no relevant changes.
+These checks used the local driver. The mixed negative still needs
+execution through the complete workflow.
+
+On the first aggregate attempt, `f7c2795` against `8da30d09`
+exhausted 1,200 seconds in the coordinator. It processed 130 of
+559 selected coordinator mutations, with 48 caught and 82 survivors.
+The aggregate never reached the other components. The trial now
+supports distinct module shards and emits partial counts on budget
+exhaustion. The coordinator needs smaller behavioral witnesses,
+followed by repeat measurements for the full supported selection.
+Keep the workflow outside required CI and fleet retention until the
+complete positives and controls pass within the declared budgets.
