@@ -122,7 +122,10 @@ source path. The command above selects these cases.
 The trial runs `scripts/mutants_diff.py BASE` on a clean committed
 head with mutmut 3.8.1 in the test environment. Set `MUTMUT` to that
 environment's executable. Use `--plan` to inspect a dirty change or
-`--shard plugin` to execute one lane. The gate archives the tested
+`--shard plugin` to execute one lane. The coordinator's file-planning
+selection uses `--shard coordinator-plan`. A production change to the
+coordinator selects the whole module and includes both witness sets.
+The gate archives the tested
 revision and runs the existing serial recipes. Unknown paths, missing
 witnesses, empty relevant selections, incomplete results, and budget
 exhaustion fail.
@@ -137,6 +140,11 @@ both the unrelated scheduling module and the protected option scope
 after a test deletion. A docs-only plan reported no relevant changes.
 These checks used the local driver. The mixed negative still needs
 execution through the complete workflow.
+
+The standalone scheduling shard accounted for all 276 identities,
+with 264 caught, 11 equivalent and one confirmed timeout. At
+`f320bda` against `4f498ebd`, the file-planning shard caught all
+79 selected identities through this same driver.
 
 On the first aggregate attempt, `f7c2795` against `8da30d09`
 exhausted 1,200 seconds in the coordinator. It processed 130 of
