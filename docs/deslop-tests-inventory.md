@@ -139,3 +139,30 @@ and `-k 'missing_hooks or shard_pin_votes or worker_limit_hook'`.
 Select `pytest_parallel.coordinator.xǁCoordinatorǁ_resolve_pins__mutmut_*`
 and `pytest_parallel.coordinator.xǁCoordinatorǁ_resolve_max_workers__mutmut_*`
 in the same serial run.
+
+## Pytest subtest replay
+
+Pytest 9.2 emits a `SubtestReport` with phase `call` for each native
+`unittest.TestCase.subTest` and then sends the ordinary call report.
+The released 0.4.0 and a wheel built from `c260153` treated these as
+duplicate primary phases. The Toolbox consumer reproduced the error
+in native fio tests that passed in serial.
+
+The coordinator now deserializes the public pytest report type before
+validating ordinary phase slots. It buffers subtests in report order
+and replays them through the same hook, including reports received
+before a worker crash. Tests verify passing and failing subtests and
+the ensuing regular phase reports. The phase checks still require
+ordinary setup, call and teardown when applicable.
+
+Run `uv run pytest --serial -q tests/test_p0_correctness.py -k
+'replays_unittest_subtest or replays_a_subtest'` and `make test lint`.
+
+The three focused cases passed with the installed wheel on pytest 9.0.0
+and 9.2.0. All 191 ordinary tests and lint passed. In Toolbox at
+`2a39b3c`, the wheel from `3e513b8` passed 749 tests in the ordinary
+parallel invocation with one skip and five fio subtests. The wheel's
+SHA-256 is
+`8e518a881812ad21c192ca7c63e6b0efb8c789d125439dba0f36ae388930af87`.
+The consumer used FFmpeg 9.0.2 and a task-local native build of fio
+3.42. No package was published.
