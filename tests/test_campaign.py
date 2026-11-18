@@ -130,29 +130,42 @@ def test_file_hooks_group_weight_and_preserve_items(tmp_path: Path) -> None:
         _item("a.py::one"), _item("b.py::one"), _item("a.py::two"),
         _item("c.py::one"), _item("c.py::two"),
     ]
-    received: list[tuple[str, tuple[str, ...]]] = []
+    for item in inputs:
+        item.path = tmp_path / item.nodeid.partition("::")[0]
+    group_marker = SimpleNamespace(args=("db",), kwargs={})
+    inputs[1].iter_markers = lambda name: iter((group_marker,) if name == "parallel_group" else ())
+    group_calls: list[tuple[Path, tuple[str, ...]]] = []
+    weight_calls: list[tuple[Path, tuple[str, ...]]] = []
 
     def groups(path: Path, items: list[Mock]) -> list[list[str]]:
-        received.append((path.name, tuple(item.nodeid for item in items)))
+        group_calls.append((path, tuple(item.nodeid for item in items)))
         items.clear()
-        return [["db"]] if path.name in {"a.py", "b.py"} else []
+        return [["db"]] if path.name == "a.py" else []
+
+    def weight(path: Path, items: list[Mock]) -> float | None:
+        weight_calls.append((path, tuple(item.nodeid for item in items)))
+        return 4.0 if path.name == "a.py" else None
 
     hooks = SimpleNamespace(
         pytest_parallel_file_groups=groups,
-        pytest_parallel_file_weight=lambda path, items: 4.0 if path.name == "a.py" else None,
+        pytest_parallel_file_weight=weight,
     )
-    coordinator = Coordinator(Mock(spec=pytest.Config, rootpath=tmp_path, hook=hooks), 2)
+    session = SimpleNamespace(gethookproxy=Mock(return_value=hooks))
+    coordinator = Coordinator(Mock(spec=pytest.Config, rootpath=tmp_path, hook=SimpleNamespace()), 2)
 
-    units = coordinator._build_units(inputs)
+    units = coordinator._build_units(inputs, session)
 
-    assert received == [
-        ("a.py", ("a.py::one", "a.py::two")),
-        ("b.py", ("b.py::one",)),
-        ("c.py", ("c.py::one", "c.py::two")),
+    assert [call.args for call in session.gethookproxy.call_args_list] == [
+        (tmp_path / name,) for name in ("a.py", "b.py", "c.py")
     ]
-    assert [(tuple(path.name for path in unit.files), unit.groups, unit.weight) for unit in units] == [
-        (("a.py", "b.py"), ("db",), 5.0),
-        (("c.py",), (), 2.0),
+    assert group_calls == weight_calls == [
+        (Path("a.py"), ("a.py::one", "a.py::two")),
+        (Path("b.py"), ("b.py::one",)),
+        (Path("c.py"), ("c.py::one", "c.py::two")),
+    ]
+    assert [(unit.files, unit.groups, unit.weight) for unit in units] == [
+        ((Path("a.py"), Path("b.py")), ("db",), 5.0),
+        ((Path("c.py"),), (), 2.0),
     ]
     assert [[item.nodeid for item in unit.items] for unit in units] == [
         ["a.py::one", "a.py::two", "b.py::one"],
@@ -167,7 +180,17 @@ def test_file_hook_rejects_nonpositive_or_nonfinite_weight(tmp_path: Path, weigh
     hooks = SimpleNamespace(pytest_parallel_file_weight=lambda path, items: weight)
     coordinator = Coordinator(Mock(spec=pytest.Config, rootpath=tmp_path, hook=hooks), 2)
 
-    with pytest.raises(pytest.UsageError, match="positive finite number"):
+    with pytest.raises(pytest.UsageError, match=r"pytest_parallel_file_weight for a\.py must return a positive finite number"):
+        coordinator._build_units([_item("a.py::one")])
+
+
+def test_file_hook_rejects_invalid_group_with_source_path(tmp_path: Path) -> None:
+    from pytest_parallel.coordinator import Coordinator
+
+    hooks = SimpleNamespace(pytest_parallel_file_groups=lambda path, items: [[""]])
+    coordinator = Coordinator(Mock(spec=pytest.Config, rootpath=tmp_path, hook=hooks), 2)
+
+    with pytest.raises(pytest.UsageError, match=r"pytest_parallel_file_groups for a\.py requires non-empty string group names"):
         coordinator._build_units([_item("a.py::one")])
 
 
