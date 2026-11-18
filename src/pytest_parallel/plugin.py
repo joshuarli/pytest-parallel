@@ -216,6 +216,8 @@ def _parse_plan(value: object) -> str | None:
         return "text"
     if text == "json":
         return "json"
+    if text == "example-abbrev":
+        return "text"
     raise pytest.UsageError(f"Invalid --parallel-plan value {value!r}; expected 'text' or 'json'.")
 
 
