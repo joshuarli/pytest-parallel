@@ -42,6 +42,8 @@ def main() -> None:
     if probe.returncode:
         parser.error("pytest or pytest-parallel missing; run uv sync --locked")
     if opts.action == "check":
+        readiness = subprocess.run(["perf-gate-ready"], capture_output=True, text=True, check=False)
+        print(f"host readiness exit {readiness.returncode}: {readiness.stdout}{readiness.stderr}".strip())
         return
     commands = {"harness": [sys.executable, "-m", "unittest", "discover", "-s", "benchmarks", "-p", "test_*.py"],
                 **{k: [sys.executable, "benchmarks/run_benchmarks.py", "--trials", "3" if opts.tier in ("scenario", "full") else "1", "--workers", "2", "--kind", k] for k in KINDS}}
