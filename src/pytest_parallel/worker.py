@@ -33,7 +33,6 @@ class ResultReporter:
         self.config: pytest.Config | None = None
         self.session: pytest.Session | None = None
         self._capture_mode = "fd"
-        self._collection_finished = False
         self._ramp_applied = False
         self._uncaptured_chunks: list[str] = []
 
@@ -109,7 +108,6 @@ class ResultReporter:
 
     def pytest_collection_finish(self, session: pytest.Session) -> None:
         self.session = session
-        self._collection_finished = True
         collected = [item.nodeid for item in session.items]
         self._emit({"type": "collection", "nodeids": collected})
         if self.expected_nodeids is not None and collected != self.expected_nodeids:

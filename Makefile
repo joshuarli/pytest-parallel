@@ -1,4 +1,4 @@
-.PHONY: build check lint test coverage mutants-scheduling preflight bump publish publish-mypypi
+.PHONY: build check lint test coverage mutants-scheduling preflight bump publish publish-mypypi bench bench-check bench-list
 
 BUMP ?= minor
 
@@ -54,3 +54,13 @@ coverage:
 
 mutants-scheduling:
 	uv run python scripts/mutants_scheduling.py
+
+BENCH_ARGS ?=
+bench:
+	uv run python benchmarks/bench.py run $(BENCH_ARGS)
+
+bench-check:
+	uv run python benchmarks/bench.py check $(BENCH_ARGS)
+
+bench-list:
+	uv run python benchmarks/bench.py list $(BENCH_ARGS)

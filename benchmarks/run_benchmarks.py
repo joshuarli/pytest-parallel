@@ -61,10 +61,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--kind", choices=("uniform", "uneven", "many_tiny", "single_file"), action="append")
     opts = parser.parse_args()
     results: dict[str, object] = {"trials": opts.trials, "workers": opts.workers, "suites": {}}
     with tempfile.TemporaryDirectory() as tmp:
-        for kind in ("uniform", "uneven", "many_tiny", "single_file"):
+        for kind in opts.kind or ("uniform", "uneven", "many_tiny", "single_file"):
             suite = Path(tmp) / kind
             suite.mkdir()
             write_suite(suite, kind)

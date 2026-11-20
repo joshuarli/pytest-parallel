@@ -149,7 +149,6 @@ class WorkerState:
     session_finished: bool = False
     session_exitstatus: int | None = None
     session_shouldstop: str | None = None
-    session_shouldfail: str | None = None
     protocol_errors: list[str] = field(default_factory=list)
     stopped_by_coordinator: bool = False
 
@@ -213,10 +212,6 @@ class Coordinator:
             session.config.get_terminal_writer().line(format_plan_text(plan))
         self.config.stash[PLAN_PRINTED] = True
         return True
-
-    def build_plan(self, items: Sequence[ShardItem]) -> dict[str, Any]:
-        _, plan, _ = self._build_plan(items)
-        return plan
 
     def _build_plan(self, items: Sequence[ShardItem]) -> tuple[list[list[ShardItem]], dict[str, Any], list[list[Unit]]]:
         session = getattr(items[0], "session", None) if items else None
@@ -1130,9 +1125,7 @@ class Coordinator:
         state.session_finished = True
         state.session_exitstatus = exitstatus
         shouldstop = event.get("shouldstop")
-        shouldfail = event.get("shouldfail")
         state.session_shouldstop = str(shouldstop) if shouldstop is not None else None
-        state.session_shouldfail = str(shouldfail) if shouldfail is not None else None
 
     def _reconcile_worker(
         self,

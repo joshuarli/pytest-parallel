@@ -37,3 +37,30 @@ All runs succeeded (non-zero exits abort the harness). Work is verified by pytes
 - Count is a heuristic estimate of cost. It does not promise time-optimal scheduling; use `pytest_parallel_file_weight` when test count is a poor cost predictor.
 - Integration tests check ramp behavior and start-method correctness; ramp overhead, tail latency and end-to-end start-method timing on Linux CI hardware remain unmeasured. Fork is not the fresh-interpreter default (see README).
 - No claim is made that count balancing improves throughput universally.
+
+## Tiered entrypoint
+
+`make bench-list BENCH_ARGS='--tier change'` lists the workloads and exclusions;
+`make bench-check BENCH_ARGS='--tier change --name uneven'` checks Python imports
+and the host-readiness tool. `make bench BENCH_ARGS='--tier edit'` exercises the
+entrypoint tests (observed under one second); `make bench BENCH_ARGS='--tier change --name uneven'` runs one round of the synthetic uneven-file workload
+(observed a few seconds). Change also includes uniform, many_tiny and
+single_file. Scenario selects the same harness with three trials per workload;
+Full is manual only and explicitly selected with `--tier full`. The names are
+workloads; areas are `harness` and `scheduling`. Repeat `--name`, `--area` or
+`--skip` to refine a selection. Unknown names and empty selections fail.
+`--dry-run` prints commands without creating a result directory. Runs write
+logs and a summary under `.work/bench/`, including revision, dirty state,
+exclusions and readiness. They have no regression budget: completion is not a
+performance verdict. Fixtures are generated afresh; the active Python must
+import pytest and the candidate plugin. Host readiness is informational, and
+uncertain observations cannot establish a timing claim.
+
+The existing workloads model scheduling shapes, not representative costly test
+suites. They measure elapsed time only; subprocess exit status is the oracle,
+not exact test counts. They do not measure process-tree CPU or aggregate memory,
+tail latency, or provide profiling attribution or interleaved baseline gates.
+PAR-15 tracks those gaps. Use a sampling profiler that covers child processes
+and a process-tree memory measurement on a representative suite before drawing
+resource conclusions. Linux start methods and cross-platform behavior are not
+benchmarked here.
