@@ -7,6 +7,18 @@ Ground evidence at 4968f8e: the plan fixture has a local pytest.ini; PR 15 CI pa
 
 ## Report
 
+Tests closure at `eb11974795c1b2e5e26183c992ec021c80b007d6`: the finite inventory is [Tests inventory](docs/deslop-tests-inventory.md), supplemented by the dispositions below. No new mutation or test is claimed in this closure. Consumers are stuff repomod and toolbox; this documentary step changes no plugin behavior. Acceptance is `make test`, `make lint`, and `todo --file TODO-DESLOP.md list --json`; coverage is diagnostic (`make coverage`), not a threshold. Historical macOS coverage was 1,545/1,759 statements and 586/718 branches at `e54d5b2f`; historical suite-cost comparisons are recorded in the linked scenarios and are not a current performance verdict.
+
+| Public contract / critical decision | Guard and remaining gap |
+| --- | --- |
+| CLI errors, collection, plan v1, hook validation and scoped grouping, weights and pins | `tests/test_options.py`, `tests/test_campaign.py`, `tests/test_partition.py`; hook exceptions have installed-wheel evidence. Dynamic third-party plugin combinations remain untested. |
+| Static assignment, file order, cap and plan | `tests/test_partition.py`, `test_hooks_weights_groups_and_pin_via_plan`; scheduling mutation record below. |
+| Startup, recollection, stop, cleanup and exit reconciliation | `test_start_methods_smoke`, `test_collection_mismatch_spawn_and_forkserver`, `test_sigterm_reaps_worker_and_removes_work_dir`, `tests/test_p0_correctness.py`; lifecycle mutation outside selected scenarios remains untested. |
+| JSONL, report, warning and subtest replay, JUnit and worker coverage | `tests/test_p0_correctness.py`, `tests/test_coverage.py`; malformed and truncated streams and contradictory status are checked. Arbitrary external report plugins remain untested. |
+| Network isolation and exceptions | `test_network_policy_and_loopback_exception`, `test_network_address_and_resolver_boundary`, `test_network_guard_installed_wheel_spawn`, `test_marker_allows_network`, `test_serial_network_is_not_guarded`; loopback evidence uses owned sockets and fake transports. |
+
+Disposition by behavior: **equivalent**: scheduling's 11 survivors concern union root choice, pin order, unused round-robin load and unreachable identity lookup defaults; the confirmed infinite-loop timeout is a detected hang, not a passing mutant ([details](docs/deslop-scheduling-tests.md)). Reader final offsets after the sole final read and UTF-8 codec spellings are equivalent in the recorded context; the diagnostic-length survivor was subsequently caught ([details](docs/deslop-event-stream.md)). The option parser's conversion-error survivor is unreachable for its matched grammar. **Accepted risk**: coordinator monitoring's 51 historical surviving identities and unmutated lifecycle decisions remain advisory; ordinary tests cover drain, termination and reconciliation, but this is not exhaustive mutation proof. The historical loopback trial's 71 survivors and two earlier unconfirmed timeouts are unqualified because generated-source activation was not verified; direct and installed-wheel behavior witnesses are the evidence, not those counts. **Untested**: other worker and coordinator decisions, broad plugin combinations and exact whole-change aggregate retention. The retained `make mutants-scheduling` checks its fixed scheduling selection and confirmed timeout; it is not a whole-change selector or hosted CI qualification. The wider retention controls in the inventory were not run and no CI lane is expanded. **Needs environment**: current local evidence is macOS arm64, Python 3.15; Linux forkserver and other supported runtime/platform shapes need their own runs; Windows and other platforms have not been validated here. Historical hosted Linux/macOS results apply only to their recorded revisions. No unsupported-platform pass is implied.
+
 Hook errors (DSLP-6) were repaired in [#22](https://github.com/joshuarli/pytest-parallel/pull/22). The [installed-wheel evidence](docs/deslop-hook-errors.md) verifies that exceptions propagate before a plan or worker starts.
 
 Event-stream scenario: bounded coordinator intake and dispatch mutation, real-worker stream witnesses, and the invalid UTF-8 fix are recorded in [event-stream evidence](docs/deslop-event-stream.md). Broader DSLP-4 remains open.
@@ -40,18 +52,6 @@ checker commands above with that environment and `PYTHONPATH="$PWD/src"`.
 The manifest and lockfile pin the same tools; no prior scratch file is needed.
 
 ## Tickets
-
-
-
-
-### DSLP-4 · P2 · Tests: coverage, boundary gaps, mutation
-
-- **Area:** deslop · tests
-- **Where:** src/pytest_parallel, test suites, Makefile and hosted CI
-- **Problem:** docs/deslop-tests-inventory.md names protected plugin, scheduling, supervision, event, reporting and local socket boundaries with current evidence and gaps. make coverage verifies both worker profiles. The whole-change gate and its hosted controls remain open.
-- **Recommendation:** Reconcile the named regions to current source, fill the remaining witnesses and retain the serial mutation union. Establish paired suite cost and exercise the complete workflow controls in docs/deslop-tests-inventory.md.
-- **Fix with:** deslop
-- **Effort:** M
 
 ### DSLP-5 · P2 · Dead code: tools and debloat
 
