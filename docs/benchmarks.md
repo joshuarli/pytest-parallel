@@ -60,7 +60,7 @@ The existing workloads model scheduling shapes, not representative costly test
 suites. They measure elapsed time only; subprocess exit status is the oracle,
 not exact test counts. They do not measure process-tree CPU or aggregate memory,
 tail latency, or provide profiling attribution or interleaved baseline gates.
-DSLP-7 tracks those gaps. Use a sampling profiler that covers child processes
+PAR-15 tracks those gaps. Use a sampling profiler that covers child processes
 and a process-tree memory measurement on a representative suite before drawing
 resource conclusions. Linux start methods and cross-platform behavior are not
 benchmarked here.
