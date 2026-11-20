@@ -1,11 +1,13 @@
 Prefix: DSLP
-Next: 7
+Next: 8
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier Calibration). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
 Ground evidence at 4968f8e: the plan fixture has a local pytest.ini; PR 15 CI passed at 0c57bde9, and the supported workflow shape and baseline costs are recorded in [Ground evidence](docs/deslop-ground.md).
 
 ## Report
+
+Dead code at `3528488`: Ruff F401/F841 was clean. Vulture 2.16 reported pytest-discovered hooks, required hook/signal arguments, mock attributes and two write-only fields plus the unused coordinator wrapper; deptry 0.25.1 reported `_pytest`, which is supplied by the declared pytest dependency. Those dynamic hooks and attributes are retained as false positives, grouped by discovery mechanism; no lint gate was added. Removed the unused coordinator `build_plan` wrapper, `WorkerState.session_shouldfail` storage and worker `_collection_finished` flag. Repository search covered source, tests, docs, scripts and build registration; the public API is restricted by AGENTS.md to Shard and named hooks. The `session_finish` wire field remains. Worker hooks, entry points, scheduling and reconciliation remain registered. No dependency was removed. The ordinary macOS Python 3.15 suite and lint passed; stuff repomod at its local clone revision ran against the editable candidate (import path `src/pytest_parallel/__init__.py`): 1,512 passed, three skipped in 151.07 seconds. Linux and third-party plugins remain unverified. Structural review kept the static scheduler, JSONL protocol, isolation and cleanup machinery because they implement declared invariants; no further behavior-preserving cut was established. No walk-back was proposed.
 
 Tests closure at `eb11974795c1b2e5e26183c992ec021c80b007d6`: the finite inventory is [Tests inventory](docs/deslop-tests-inventory.md), supplemented by the dispositions below. No new mutation or test is claimed in this closure. Consumers are stuff repomod and toolbox; this documentary step changes no plugin behavior. Acceptance is `make test`, `make lint`, and `todo --file TODO-DESLOP.md list --json`; coverage is diagnostic (`make coverage`), not a threshold. Historical macOS coverage was 1,545/1,759 statements and 586/718 branches at `e54d5b2f`; historical suite-cost comparisons are recorded in the linked scenarios and are not a current performance verdict.
 
@@ -53,11 +55,12 @@ The manifest and lockfile pin the same tools; no prior scratch file is needed.
 
 ## Tickets
 
-### DSLP-5 · P2 · Dead code: tools and debloat
+### DSLP-7 · P3 · Benchmark representative suites and resource costs
 
-- **Area:** deslop · dead code
-- **Where:** whole repository
-- **Problem:** No dead-code scan has run.
-- **Recommendation:** Run the deslop Dead code step. Accept: tools clean or allowlisted with reasons; walk-backs filed as Needs owner tickets.
-- **Fix with:** deslop
+- **Area:** deslop · benchmark coverage
+- **Where:** benchmarks/run_benchmarks.py
+- **Problem:** The synthetic CPU-trivial suites measure wall time only and do not represent real test workloads, aggregate process memory or CPU, attribution, tail latency, or a paired regression budget.
+- **Recommendation:** Add a reproducible representative suite with completed-work and correctness oracles; measure process-tree resources and document profiling and paired host-gated comparisons.
+- **Fix with:** bench-pyramid
 - **Effort:** M
+
