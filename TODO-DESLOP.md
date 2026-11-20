@@ -1,11 +1,14 @@
 Prefix: DSLP
-Next: 8
+Next: 9
 
 Deslop campaign backlog ([plan](https://github.com/laputa-systems/stuff/blob/main/docs/campaigns/deslop.md), tier Calibration). One agent works this file with the `deslop` skill: take the lowest-numbered open ticket whose area does not start with `Needs owner ·`. After DSLP-5, work the open P1 and P2 findings, then fill in `## Report` below.
 
 Ground evidence at 4968f8e: the plan fixture has a local pytest.ini; PR 15 CI passed at 0c57bde9, and the supported workflow shape and baseline costs are recorded in [Ground evidence](docs/deslop-ground.md).
 
 ## Report
+
+Bench audit: the existing harness generates uniform, uneven, many-tiny and single-file synthetic suites, measures collection, serial and two scheduling modes plus plan wall time, and checks subprocess exit status. It does not assert exact completed counts, represent costly real suites, measure aggregate memory/CPU or tail latency, offer profiling attribution, or compare interleaved baselines against a budget. DSLP-7 records those outcome and observability gaps; DSLP-8 records preflight and provenance gaps. The tiered entrypoint adds Edit harness tests and short Change workloads on the existing harness, selection, preflight, dry-run and per-run logs. `make bench BENCH_ARGS='--tier edit'` and `make bench BENCH_ARGS='--tier change --name uneven'` passed; the latter produced measurements. Host readiness was uncertain: no timing or regression verdict is claimed. Scenario, Full, Linux and other platforms were not run. The local entrypoint does not change the plugin or its consumers.
+
 
 Dead code at `3528488`: Ruff F401/F841 was clean. Vulture 2.16 reported pytest-discovered hooks, required hook/signal arguments, mock attributes and two write-only fields plus the unused coordinator wrapper; deptry 0.25.1 reported `_pytest`, which is supplied by the declared pytest dependency. Those dynamic hooks and attributes are retained as false positives, grouped by discovery mechanism; no lint gate was added. Removed the unused coordinator `build_plan` wrapper, `WorkerState.session_shouldfail` storage and worker `_collection_finished` flag. Repository search covered source, tests, docs, scripts and build registration; the public API is restricted by AGENTS.md to Shard and named hooks. The `session_finish` wire field remains. Worker hooks, entry points, scheduling and reconciliation remain registered. No dependency was removed. The ordinary macOS Python 3.15 suite and lint passed; stuff repomod at its local clone revision ran against the editable candidate (import path `src/pytest_parallel/__init__.py`): 1,512 passed, three skipped in 151.07 seconds. Linux and third-party plugins remain unverified. Structural review kept the static scheduler, JSONL protocol, isolation and cleanup machinery because they implement declared invariants; no further behavior-preserving cut was established. No walk-back was proposed.
 
@@ -61,6 +64,15 @@ The manifest and lockfile pin the same tools; no prior scratch file is needed.
 - **Where:** benchmarks/run_benchmarks.py
 - **Problem:** The synthetic CPU-trivial suites measure wall time only and do not represent real test workloads, aggregate process memory or CPU, attribution, tail latency, or a paired regression budget.
 - **Recommendation:** Add a reproducible representative suite with completed-work and correctness oracles; measure process-tree resources and document profiling and paired host-gated comparisons.
+- **Fix with:** bench-pyramid
+- **Effort:** M
+
+### DSLP-8 · P3 · Strengthen benchmark preflight and result provenance
+
+- **Area:** deslop · benchmark operability
+- **Where:** benchmarks/bench.py
+- **Problem:** The entrypoint checks imports and host tool availability but does not verify disk capacity, leftover processes, tool versions or package artifact identity; host diagnostics are not retained in the summary.
+- **Recommendation:** Add selected-workload prerequisite and process checks, preserve readiness diagnostics and exact tool and artifact identity, and test failures before workload execution.
 - **Fix with:** bench-pyramid
 - **Effort:** M
 
