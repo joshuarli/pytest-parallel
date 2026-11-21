@@ -18,6 +18,7 @@ A pytest plugin that collects in the parent session and assigns whole test files
 - Worker processes, recollection, and cleanup: `tests/test_campaign.py::test_start_methods_smoke`, `test_collection_mismatch_spawn_and_forkserver`, and `tests/test_backlog.py::test_sigterm_reaps_worker_and_removes_work_dir`.
 - Network isolation and exceptions: `tests/test_integration.py::test_network_policy_and_loopback_exception`, `test_marker_allows_network`, and `test_serial_network_is_not_guarded`.
 - Performance: `benchmarks/run_benchmarks.py` exercises scheduler shapes but is CPU-trivial; a reproducible representative workload is required for runtime changes (see Ground evidence). Consumers: stuff and toolbox; unaffected by this docs-only change, checks not run (toolbox billing excluded).
+- Deslop: the completed campaign report, with sourced numbers and unverified cases, is [docs/deslop-report.md](docs/deslop-report.md).
 
 - Coverage: `make coverage` uses native coverage.py with two workers and checks worker data; `tests/test_coverage.py` proves the installed-wheel worker/branch oracle and negative control. See [coverage evidence](docs/deslop-coverage.md) for settings, tier costs and limitations.
 - Edit: `uv run pytest -p no:parallel tests/test_coverage.py -q`; change and existing CI: `make test` and `make lint`; diagnostic: `make coverage`. Mutation and its CI qualification remain open.
