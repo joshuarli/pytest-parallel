@@ -11,6 +11,8 @@ A pytest plugin that collects in the parent session and assigns whole test files
 
 ## Verification
 
+`make clean` removes the generated directories `dist`, `.pytest_cache`, `.ruff_cache`. It preserves the installed environment and refuses symlinked outputs.
+
 - `make test` runs the suite; `make lint` runs Ruff and ty. Cold and warm test runs took 7.50s and 7.48s; lint took 1.18s (macOS, Python 3.15.2); see [Ground evidence](docs/deslop-ground.md) for gates, setup, and limitations.
 - CLI scheduling and usage errors: `tests/test_options.py`; plan JSON v1 and exit behavior: `tests/test_campaign.py::test_json_plan_stdout_is_one_document` and `test_json_plan_collection_error_is_nonzero`.
 - `Shard` and scheduling hooks: `tests/test_campaign.py::test_shard_is_frozen`, `test_hooks_weights_groups_and_pin_via_plan`, and `test_conftest_hooks_stay_inside_their_directory`.

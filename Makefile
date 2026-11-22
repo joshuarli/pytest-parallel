@@ -64,3 +64,12 @@ bench-check:
 
 bench-list:
 	uv run python benchmarks/bench.py list $(BENCH_ARGS)
+
+.PHONY: clean
+clean:
+	@for artifact in ./dist ./.pytest_cache ./.ruff_cache; do \
+	  if test -L "$$artifact" || { test -e "$$artifact" && ! test -d "$$artifact"; }; then \
+	    printf 'make clean: %s must be a local build directory\n' "$$artifact" >&2; exit 1; \
+	  fi; \
+	done
+	rm -rf -- ./dist ./.pytest_cache ./.ruff_cache
