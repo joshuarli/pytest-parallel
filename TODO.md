@@ -1,11 +1,11 @@
 Prefix: PAR
 Next: 18
-### PAR-17 · P2 · Unittest subtests are reported as worker setup errors
+### PAR-17 · P2 · Passing tests are reported as worker errors
 
 - **Area:** result reporting
 - **Where:** pytest_parallel worker report forwarding
-- **Problem:** A unittest.TestCase test that uses self.subTest and passes is reported as `ERROR at setup` with `worker N failure (exit code 0)` and `duplicate 'call' report for '<nodeid>'`, while the worker output shows the test passed. Reproduced with joshuarli-pytest-parallel 0.4.0 (laputa-systems/stuff .venv, Python 3.15.2, macOS arm64): `uv run --group dev pytest -q deploy/openorange/tests/test_receipt.py` on stuff 501db113 gives `2 passed, 1 error, 3 subtests passed`; `python -m unittest test_receipt` passes. Every subTest-using rollout test in stuff fails the suite this way, so a green suite cannot be told from a red one without rerunning under unittest.
-- **Recommendation:** Accept one call report per subtest (the subtests plugin emits several per item) and aggregate them into the item outcome; add a regression test with a passing and a failing unittest subTest that asserts the exact pass, fail and error counts.
+- **Problem:** Passing tests are reported as `ERROR at setup` with `worker N failure (exit code 0)`, while the worker output shows them passing; unittest subTest tests also log `duplicate 'call' report for '<nodeid>'`. Reproduced with joshuarli-pytest-parallel 0.4.0 (laputa-systems/stuff .venv, Python 3.15.2, macOS arm64): `uv run --group dev pytest -q deploy/openorange/tests` on stuff b632aba9 reported 139 passed, 2 skipped and 13 errors with no traceback or assertion, about one error per worker, and the errors included plain pytest functions such as test_lease.py::test_observe_cli_reads_identity_without_a_mutation_bound as well as subTest tests; `pytest -p no:parallel` on the same tree gives 163 passed, 2 skipped. A green suite cannot be told from a red one without rerunning serially.
+- **Recommendation:** Reproduce with a worker count below the test count and with one passing unittest subTest; make each worker's final report and subtest call reports aggregate into one outcome per item; add a regression test asserting the exact pass, fail and error counts for a passing plain test, a passing subTest test and a failing test.
 - **Fix with:** root-cause
 - **Effort:** S
 
