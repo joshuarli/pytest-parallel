@@ -2,6 +2,8 @@
 
 A pytest plugin that collects in the parent session and assigns whole test files (or combined affinity groups) to fixed worker processes.
 
+The roadmap, [docs/roadmap.md](docs/roadmap.md), holds all current and future work; its Status is the resume point.
+
 ## Development
 
 - `make check` runs Ruff and ty.
