@@ -15,18 +15,16 @@ The roadmap, [docs/roadmap.md](docs/roadmap.md), holds all current and future wo
 
 `make clean` removes the generated directories `dist`, `.pytest_cache`, `.ruff_cache`. It preserves the installed environment and refuses symlinked outputs.
 
-- `make test` runs the suite; `make lint` runs Ruff and ty. Cold and warm test runs took 7.50s and 7.48s; lint took 1.18s (macOS, Python 3.15.2); see [Ground evidence](docs/deslop-ground.md) for gates, setup, and limitations.
+- `make test` runs the suite; `make lint` runs Ruff and ty.
 - CLI scheduling and usage errors: `tests/test_options.py`; plan JSON v1 and exit behavior: `tests/test_campaign.py::test_json_plan_stdout_is_one_document` and `test_json_plan_collection_error_is_nonzero`.
 - `Shard` and scheduling hooks: `tests/test_campaign.py::test_shard_is_frozen`, `test_hooks_weights_groups_and_pin_via_plan`, and `test_conftest_hooks_stay_inside_their_directory`.
 - JSONL stream validation and reconciliation: `tests/test_p0_correctness.py::test_jsonl_protocol_rejects_truncated_and_malformed_streams` and `test_reconcile_rejects_contradictory_exit_status`.
 - Worker processes, recollection, and cleanup: `tests/test_campaign.py::test_start_methods_smoke`, `test_collection_mismatch_spawn_and_forkserver`, and `tests/test_backlog.py::test_sigterm_reaps_worker_and_removes_work_dir`.
 - Network isolation and exceptions: `tests/test_integration.py::test_network_policy_and_loopback_exception`, `test_marker_allows_network`, and `test_serial_network_is_not_guarded`.
-- Performance: `benchmarks/run_benchmarks.py` exercises scheduler shapes but is CPU-trivial; a reproducible representative workload is required for runtime changes (see Ground evidence). Consumers: stuff and toolbox; unaffected by this docs-only change, checks not run (toolbox billing excluded).
-- Deslop: the completed campaign report, with sourced numbers and unverified cases, is [docs/deslop-report.md](docs/deslop-report.md).
-
-- Coverage: `make coverage` uses native coverage.py with two workers and checks worker data; `tests/test_coverage.py` proves the installed-wheel worker/branch oracle and negative control. See [coverage evidence](docs/deslop-coverage.md) for settings, tier costs and limitations.
+- Performance: `benchmarks/run_benchmarks.py` exercises scheduler shapes but is CPU-trivial; runtime changes need a reproducible representative workload with realistic test costs and distribution, correctness checks, and interleaved baseline and candidate runs under passing host gates.
+- Coverage: `make coverage` uses native coverage.py with two workers and checks worker data; `tests/test_coverage.py` proves the installed-wheel worker/branch oracle and negative control. Coverage can miss worker execution when data is stale or incomplete; inspect worker data before combining it.
 - Edit: `uv run pytest -p no:parallel tests/test_coverage.py -q`; change and existing CI: `make test` and `make lint`; diagnostic: `make coverage`. Mutation and its CI qualification remain open.
-- Scheduling component mutation: `make mutants-scheduling` requires mutmut 3.8.1 and pytest in its tool environment; see [scenario evidence](docs/deslop-scheduling-tests.md). Broader mutation and CI remain open.
+- Scheduling component mutation: `make mutants-scheduling` requires mutmut 3.8.1 and pytest in its tool environment; run mutation tests serially with `-p no:parallel` and verify that tests load instrumented source.
 
 ## Invariants
 

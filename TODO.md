@@ -1,5 +1,5 @@
 Prefix: PAR
-Next: 18
+Next: 22
 ### PAR-17 · P2 · Passing tests are reported as worker errors
 
 - **Area:** result reporting
@@ -26,4 +26,40 @@ Next: 18
 - **Recommendation:** Add selected-workload prerequisite and process checks, preserve readiness diagnostics and exact tool and artifact identity, and test failures before workload execution.
 - **Fix with:** bench-pyramid
 - **Effort:** M
+
+### PAR-18 · P3 · Qualify worker stop and lifecycle coverage
+
+- **Area:** worker lifecycle
+- **Where:** src/pytest_parallel/coordinator.py:_monitor, _trigger_global_stop, _terminate_live_workers; tests/test_p0_correctness.py
+- **Problem:** The stop and drain tests leave monitor mutations and wider worker lifecycle decisions unclassified, so important shutdown regressions may escape detection.
+- **Recommendation:** Review surviving mutations and exercise reachable stop, drain, supervision and cleanup behavior; classify equivalent cases and cover observable gaps.
+- **Fix with:** test-audit
+- **Effort:** M
+
+### PAR-19 · P3 · Qualify mutation coverage for changed behavior
+
+- **Area:** test quality
+- **Where:** scripts/mutants_scheduling.py; src/pytest_parallel/coordinator.py; src/pytest_parallel/worker.py; src/pytest_parallel/network.py
+- **Problem:** Mutation checks cover selected scheduling decisions only; the whole-change selector remains an incomplete draft and network mutation observations lacked instrumented-source activation and timeout confirmation.
+- **Recommendation:** Develop and qualify a bounded serial mutation workflow covering changed and protected regions, verify instrumented-source activation, classify surviving and timed-out cases, and exercise deletion, uncovered decision, mixed-change and documentation-only controls.
+- **Fix with:** test-audit
+- **Effort:** L
+
+### PAR-20 · P4 · Qualify worker coverage on other platforms
+
+- **Area:** coverage
+- **Where:** tests/test_coverage.py; Makefile:coverage
+- **Problem:** Worker coverage data checks were qualified on macOS; Linux and other plugin combinations remain unverified, and the guard depends on coverage data filename layout.
+- **Recommendation:** Exercise the installed-wheel worker and branch oracle and raw data checks on Linux and relevant supported plugin combinations; document any limitations.
+- **Fix with:** test-audit
+- **Effort:** M
+
+### PAR-21 · P4 · Review typing escapes in correctness tests
+
+- **Area:** test typing
+- **Where:** tests/test_p0_correctness.py
+- **Problem:** The soundness of typing escapes added in correctness tests has not been reviewed individually, so unsafe assumptions may be hidden from the type checker.
+- **Recommendation:** Audit each relevant cast, Any annotation and suppression against its runtime contract and narrow or justify it where needed.
+- **Fix with:** typing-audit
+- **Effort:** S
 
